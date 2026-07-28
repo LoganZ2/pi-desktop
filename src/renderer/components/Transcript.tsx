@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ApprovalRequest, ChatBlock, ChatMessage } from "../../shared/ipc.js";
-import { IconChevron } from "../lib/icons.js";
+import type {
+  ApprovalRequest,
+  ChatBlock,
+  ChatMessage,
+  CompactionNotice,
+} from "../../shared/ipc.js";
+import { IconChevron, IconCompress } from "../lib/icons.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { ToolCard, contentToText, type ToolRun } from "./ToolCard.js";
-import { cx } from "./ui.js";
+import { cx, formatTokens } from "./ui.js";
 
 export { contentToText, type ToolRun };
 
@@ -43,7 +48,34 @@ function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen: boole
   );
 }
 
-type ItemKind = "user" | "text" | "thinking" | "tool" | "error";
+function CompactionMarker({ notice }: { notice: CompactionNotice }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Older messages above were summarized to free up context. Click to read the summary the model keeps."
+        className="group flex w-full items-center gap-3"
+      >
+        <span className="h-px flex-1 bg-ink-800" />
+        <span className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide text-mist-500 uppercase transition group-hover:text-mist-300">
+          <IconCompress className="h-3 w-3" />
+          Context compacted · {formatTokens(notice.tokensBefore)} tokens summarized
+          <IconChevron className={cx("h-3 w-3 transition", open ? "rotate-0" : "-rotate-90")} />
+        </span>
+        <span className="h-px flex-1 bg-ink-800" />
+      </button>
+      {open && (
+        <div className="mt-3 rounded-xl border border-ink-800 bg-ink-900/60 px-3.5 py-3">
+          <Markdown source={notice.summary} className="text-[13px] text-mist-400" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ItemKind = "user" | "text" | "thinking" | "tool" | "error" | "compaction";
 interface Item {
   key: string;
   kind: ItemKind;
@@ -54,12 +86,14 @@ interface Item {
 function spacingFor(previous: ItemKind | undefined, current: ItemKind): string {
   if (!previous) return "";
   if (previous === "tool" && current === "tool") return "mt-1.5";
+  if (previous === "compaction" || current === "compaction") return "mt-6";
   if (current === "user") return "mt-6";
   return "mt-4";
 }
 
 interface TranscriptProps {
   messages: ChatMessage[];
+  compactions: CompactionNotice[];
   streaming: ChatMessage | null;
   toolRuns: Record<string, ToolRun>;
   approvals: Record<string, ApprovalRequest>;
@@ -69,6 +103,7 @@ interface TranscriptProps {
 
 export function Transcript({
   messages,
+  compactions,
   streaming,
   toolRuns,
   approvals,
@@ -118,14 +153,42 @@ export function Transcript({
     }
   }
 
-  const visible = [...messages.filter((m) => m.role !== "toolResult")];
-  if (streaming) visible.push(streaming);
+  // Compaction markers slot in by how many persisted messages precede them,
+  // counted against the raw transcript (before tool results are hidden).
+  type Row =
+    | { kind: "message"; message: ChatMessage }
+    | { kind: "compaction"; notice: CompactionNotice };
+  const sortedNotices = [...compactions].sort((a, b) => a.afterMessageCount - b.afterMessageCount);
+  const rows: Row[] = [];
+  let noticeIndex = 0;
+  messages.forEach((message, index) => {
+    while (
+      noticeIndex < sortedNotices.length &&
+      sortedNotices[noticeIndex].afterMessageCount <= index
+    ) {
+      rows.push({ kind: "compaction", notice: sortedNotices[noticeIndex++] });
+    }
+    if (message.role !== "toolResult") rows.push({ kind: "message", message });
+  });
+  while (noticeIndex < sortedNotices.length) {
+    rows.push({ kind: "compaction", notice: sortedNotices[noticeIndex++] });
+  }
+  if (streaming) rows.push({ kind: "message", message: streaming });
 
   // Flatten to a single list so spacing can react to what actually sits next
   // to what, rather than to message boundaries.
   const items: Item[] = [];
-  visible.forEach((message, messageIndex) => {
-    const base = `${messageIndex}-${message.timestamp ?? ""}`;
+  rows.forEach((row, rowIndex) => {
+    if (row.kind === "compaction") {
+      items.push({
+        key: `compaction-${row.notice.id}`,
+        kind: "compaction",
+        node: <CompactionMarker notice={row.notice} />,
+      });
+      return;
+    }
+    const message = row.message;
+    const base = `${rowIndex}-${message.timestamp ?? ""}`;
 
     if (message.role === "user") {
       items.push({

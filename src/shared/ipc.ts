@@ -1,9 +1,15 @@
 // Shared contract between the Electron main process, preload bridge, and renderer.
 // Type-only imports from pi are erased at compile time, so the renderer bundle
 // never pulls in node code.
-import type { AgentEvent, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type {
+  AgentEvent as CoreAgentEvent,
+  SessionCompactEvent,
+  ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
 
-export type { AgentEvent, ThinkingLevel };
+/** Clone-safe harness events consumed by the renderer. */
+export type AgentEvent = CoreAgentEvent | SessionCompactEvent;
+export type { ThinkingLevel };
 
 /** How shell commands are gated before they run. */
 export type ApprovalMode = "ask" | "auto";
@@ -28,6 +34,8 @@ export interface BehaviorSettings {
   sendOnEnter: boolean;
   autoExpandThinking: boolean;
   showTokenUsage: boolean;
+  /** Summarize old history automatically before the model context fills up. */
+  autoCompact: boolean;
 }
 
 /** How a new chat's workspace is chosen. */
@@ -136,6 +144,25 @@ export interface ChatMessage {
   [key: string]: unknown;
 }
 
+export interface CompactionNotice {
+  id: string;
+  /** Number of persisted messages preceding this marker in the transcript. */
+  afterMessageCount: number;
+  timestamp: string;
+  summary: string;
+  tokensBefore: number;
+}
+
+export interface ContextUsage {
+  /** Estimated tokens that will be sent on the next model request. */
+  tokens: number;
+  contextWindow: number;
+  /** Threshold at which pi's default compaction policy activates. */
+  compactAt: number;
+  /** Whether there is enough old history for a useful manual compaction. */
+  canCompact: boolean;
+}
+
 /** Everything the renderer needs to draw the app, refreshed after any mutation. */
 export interface AppState {
   behavior: BehaviorSettings;
@@ -146,7 +173,10 @@ export interface AppState {
   sessions: SessionSummary[];
   activeSessionPath: string | null;
   messages: ChatMessage[];
+  compactions: CompactionNotice[];
   isStreaming: boolean;
+  isCompacting: boolean;
+  contextUsage: ContextUsage;
   stats: { tokens: number; cost: number };
   appVersion: string;
 }
@@ -193,6 +223,7 @@ export interface PiBridge {
   // chat
   prompt(text: string): Promise<{ steered: boolean }>;
   abort(): Promise<AppState>;
+  compact(): Promise<AppState>;
 
   // sessions
   newSession(input: NewChatInput): Promise<AppState>;

@@ -141,6 +141,17 @@ export function App() {
     }
   };
 
+  const compact = async () => {
+    try {
+      applyState(await window.pi.compact());
+    } catch (error) {
+      console.error("compaction failed:", error);
+      // The main process pushed isCompacting=true at the start; re-sync so the
+      // composer never sticks in the compacting state after a failure.
+      void refresh();
+    }
+  };
+
   const respondApproval = (approvalId: string, allow: boolean, always: boolean) => {
     setApprovals((prev) =>
       Object.fromEntries(Object.entries(prev).filter(([, v]) => v.approvalId !== approvalId)),
@@ -218,6 +229,7 @@ export function App() {
         {hasContent ? (
           <Transcript
             messages={messages}
+            compactions={state.compactions}
             streaming={streaming}
             toolRuns={toolRuns}
             approvals={approvals}
@@ -283,6 +295,7 @@ export function App() {
           draft={draft}
           onSend={send}
           onStop={() => void window.pi.abort().then(applyState)}
+          onCompact={() => void compact()}
           onSelectModel={(key) => void window.pi.setActiveModel(key).then(applyState)}
           onSelectThinking={(level: ThinkingLevel) => updateBehavior({ thinkingLevel: level })}
           onSelectApproval={(mode: ApprovalMode) =>

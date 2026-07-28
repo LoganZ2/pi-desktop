@@ -8,19 +8,15 @@ import type {
 import {
   IconArrowUp,
   IconCheck,
+  IconCompress,
   IconCube,
   IconPlus,
   IconShield,
   IconSliders,
+  IconSpinner,
   IconStop,
 } from "../lib/icons.js";
-import { Dropdown, MenuItem, MenuLabel, cx } from "./ui.js";
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
+import { Dropdown, MenuItem, MenuLabel, cx, formatTokens } from "./ui.js";
 
 interface ComposerProps {
   state: AppState;
@@ -29,6 +25,7 @@ interface ComposerProps {
   draft?: { text: string; id: number } | null;
   onSend: (text: string) => void;
   onStop: () => void;
+  onCompact: () => void;
   onSelectModel: (key: string) => void;
   onSelectThinking: (level: ThinkingLevel) => void;
   onSelectApproval: (mode: ApprovalMode) => void;
@@ -54,6 +51,7 @@ export function Composer({
   draft,
   onSend,
   onStop,
+  onCompact,
   onSelectModel,
   onSelectThinking,
   onSelectApproval,
@@ -63,8 +61,15 @@ export function Composer({
   const [focused, setFocused] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { behavior, session, models, isStreaming, stats } = state;
+  const { behavior, session, models, isStreaming, isCompacting, contextUsage, stats } = state;
   const disabled = !activeModel || !session;
+
+  const contextPct =
+    contextUsage.contextWindow > 0
+      ? Math.min(100, Math.round((contextUsage.tokens / contextUsage.contextWindow) * 100))
+      : 0;
+  /** Fraction of the auto-compact threshold, so the meter warns before compaction kicks in. */
+  const contextPressure = contextUsage.compactAt > 0 ? contextUsage.tokens / contextUsage.compactAt : 0;
 
   useEffect(() => {
     if (!draft) return;
@@ -129,7 +134,9 @@ export function Composer({
                   ? "Start a chat to begin…"
                   : isStreaming
                     ? "Agent is working…"
-                    : "Ask the agent to build, fix, or explain something…"
+                    : isCompacting
+                      ? "Compacting conversation…"
+                      : "Ask the agent to build, fix, or explain something…"
             }
             className="max-h-[200px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[14px] text-mist-100 outline-none placeholder:text-mist-500 disabled:cursor-not-allowed"
           />
@@ -265,6 +272,48 @@ export function Composer({
               <span className="mr-1 font-mono text-[11px] text-mist-500">
                 {formatTokens(stats.tokens)} tok · ${stats.cost.toFixed(4)}
               </span>
+            )}
+
+            {session && contextUsage.tokens > 0 && contextUsage.contextWindow > 0 && (
+              <span
+                title={`≈${formatTokens(contextUsage.tokens)} of ${formatTokens(contextUsage.contextWindow)} context tokens in use${
+                  behavior.autoCompact && contextUsage.compactAt > 0
+                    ? ` · auto-compacts around ${formatTokens(contextUsage.compactAt)}`
+                    : ""
+                }`}
+                className={cx(
+                  "mr-0.5 font-mono text-[11px]",
+                  contextPressure >= 1
+                    ? "text-rose-soft"
+                    : contextPressure >= 0.8
+                      ? "text-amber-soft"
+                      : "text-mist-500",
+                )}
+              >
+                {contextPct}% ctx
+              </span>
+            )}
+
+            {session && (
+              <button
+                type="button"
+                onClick={onCompact}
+                disabled={isStreaming || isCompacting || !contextUsage.canCompact}
+                title={
+                  isCompacting
+                    ? "Compacting conversation…"
+                    : contextUsage.canCompact
+                      ? "Compact conversation — summarize older messages to free up context"
+                      : "Nothing to compact yet"
+                }
+                className="flex h-8 w-8 items-center justify-center rounded-xl text-mist-500 transition hover:bg-ink-800 hover:text-mist-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mist-500"
+              >
+                {isCompacting ? (
+                  <IconSpinner className="h-3.5 w-3.5" />
+                ) : (
+                  <IconCompress className="h-3.5 w-3.5" />
+                )}
+              </button>
             )}
 
             {isStreaming ? (

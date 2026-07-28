@@ -25,6 +25,7 @@ const DEFAULTS: BehaviorSettings = {
   sendOnEnter: true,
   autoExpandThinking: false,
   showTokenUsage: true,
+  autoCompact: true,
 };
 
 export class ConfigStore {

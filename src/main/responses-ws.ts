@@ -1,4 +1,10 @@
-// Responses API over WebSocket, with automatic fallback to SSE.
+// Responses API over WebSocket, with retries and automatic fallback to SSE.
+//
+// Reliability: keepalive pings stop proxies from killing quiet connections
+// mid-response (the classic 1006 close while the model thinks), a stall
+// detector surfaces dead connections instead of hanging, and transport
+// failures retry the request — once more over websocket, then over SSE — so a
+// dropped connection degrades instead of ending the conversation.
 //
 // pi ships no websocket transport for the OpenAI Responses wire format — its
 // only websocket client speaks the ChatGPT/Codex backend protocol. This adds
@@ -35,19 +41,58 @@ import {
 const TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const MIN_OUTPUT_TOKENS = 16;
 const CONNECT_TIMEOUT_MS = 15_000;
-/** Consecutive connect failures before a provider stops trying websockets. */
+/** Consecutive transport failures before a provider stops trying websockets. */
 export const WS_FAILURE_LIMIT = 5;
+/** Websocket attempts per request before the SSE fallback takes over. */
+const WS_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 750;
+/**
+ * Keepalive: proxies and NATs kill connections that go quiet while the model
+ * thinks, which surfaces as a 1006 close mid-response. Pings keep traffic
+ * flowing; a stall this long with no frames or pongs means the connection is
+ * dead (or the server ignores pings — the retry/SSE ladder covers that too).
+ */
+const PING_INTERVAL_MS = 20_000;
+const STALL_TIMEOUT_MS = 75_000;
 
 /** Terminal server events, after which the response is finished. */
 const TERMINAL_EVENTS = new Set(["response.completed", "response.failed", "response.incomplete"]);
 
-/** Raised only for failures before any output — the safe point to retry over SSE. */
+/** Raised when the handshake fails — no request ever reached the model. */
 class WebSocketUnavailableError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = "WebSocketUnavailableError";
   }
 }
+
+/**
+ * Raised for socket-level failures after the handshake (abnormal close, stall,
+ * garbled frame). The request can be retried from scratch: every event pi
+ * consumers see carries the full partial message and replaces the previous
+ * one, so a restarted response supersedes whatever already streamed. API
+ * errors reported by the server stay plain `Error`s and are never retried.
+ */
+class WebSocketTransportError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "WebSocketTransportError";
+  }
+}
+
+const isTransportError = (error: unknown): boolean =>
+  error instanceof WebSocketUnavailableError || error instanceof WebSocketTransportError;
+
+const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 export interface WebSocketStatus {
   /** False once the failure limit is hit; resets when the app restarts. */
@@ -162,6 +207,7 @@ async function* streamEvents(
   let finished = false;
   let failure: Error | undefined;
   let notify: (() => void) | undefined;
+  let keepalive: ReturnType<typeof setInterval> | undefined;
   const wake = () => {
     notify?.();
     notify = undefined;
@@ -187,30 +233,50 @@ async function* streamEvents(
       signal?.addEventListener("abort", () => fail(new Error("Request was aborted")), { once: true });
     });
 
-    // Past the handshake, failures are ordinary errors: retrying over SSE would
-    // duplicate whatever the model already streamed.
+    // Past the handshake, socket-level failures are transport errors the
+    // caller may retry; only errors the server itself reports are final.
+    let lastActivity = Date.now();
     socket.on("message", (data: unknown) => {
+      lastActivity = Date.now();
       try {
         pending.push(JSON.parse(String(data)));
       } catch (error) {
-        failure = new Error(`Invalid JSON frame from ${url}: ${String(error)}`);
+        failure = new WebSocketTransportError(`Invalid JSON frame from ${url}: ${String(error)}`);
         finished = true;
       }
       wake();
     });
+    socket.on("pong", () => {
+      lastActivity = Date.now();
+    });
     socket.on("error", (error: Error) => {
-      failure = error;
+      failure = new WebSocketTransportError(`WebSocket error: ${error.message}`, { cause: error });
       finished = true;
       wake();
     });
     socket.on("close", (code: number, reason: Buffer) => {
       if (!failure) {
-        failure = new Error(`WebSocket closed before the response finished (${code} ${reason})`);
+        failure = new WebSocketTransportError(
+          `WebSocket closed before the response finished (${code} ${reason})`,
+        );
       }
       finished = true;
       wake();
     });
     signal?.addEventListener("abort", abort, { once: true });
+
+    keepalive = setInterval(() => {
+      if (Date.now() - lastActivity > STALL_TIMEOUT_MS) {
+        failure = new WebSocketTransportError(
+          `WebSocket stalled: no frames or pongs for ${Math.round(STALL_TIMEOUT_MS / 1000)}s`,
+        );
+        finished = true;
+        socket.terminate();
+        wake();
+        return;
+      }
+      if (socket.readyState === WebSocket.OPEN) socket.ping();
+    }, PING_INTERVAL_MS);
 
     socket.send(JSON.stringify({ type: "response.create", ...params }));
 
@@ -225,12 +291,13 @@ async function* streamEvents(
         if (event?.type && TERMINAL_EVENTS.has(event.type)) return;
       }
       if (failure) throw failure;
-      if (finished) throw new Error("WebSocket closed before the response finished");
+      if (finished) throw new WebSocketTransportError("WebSocket closed before the response finished");
       await new Promise<void>((resolve) => {
         notify = resolve;
       });
     }
   } finally {
+    if (keepalive) clearInterval(keepalive);
     signal?.removeEventListener("abort", abort);
     try {
       socket.close(1000, "done");
@@ -262,8 +329,12 @@ function emptyAssistantMessage(model: Model<Api>): AssistantMessage {
 
 /**
  * `ProviderStreams` that prefers websockets and falls back to pi's stock SSE
- * implementation — per request when a connection fails, and outright once the
- * breaker trips.
+ * implementation. Transport failures — including mid-stream drops like a 1006
+ * close — retry the request: once more over websocket, then over SSE, all
+ * within the same event stream. A restart is safe because every event carries
+ * the full partial message and replaces the previous one downstream; only the
+ * single `start` event must not repeat. The breaker turns chronic flakiness
+ * into an outright switch to SSE.
  */
 export function responsesApiWithWebSocket(
   breaker: WebSocketBreaker,
@@ -276,64 +347,96 @@ export function responsesApiWithWebSocket(
 
     void (async () => {
       const providerId = model.provider;
+      let startEmitted = false;
+
+      const emitFailure = (error: Error) => {
+        const output = emptyAssistantMessage(model);
+        output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+        output.errorMessage = error.message;
+        out.push({ type: "error", reason: output.stopReason, error: output });
+        out.end();
+      };
 
       if (isEnabled(providerId) && breaker.allows(providerId)) {
-        const output = emptyAssistantMessage(model);
-        let started = false;
+        // The payload hook runs once so retries resend the identical request.
+        let params: Record<string, unknown>;
         try {
-          let params = buildParams(model, context, options);
+          params = buildParams(model, context, options);
           const patched = await options?.onPayload?.(params, model);
           if (patched !== undefined) params = patched as Record<string, unknown>;
-
-          const events = streamEvents(model, params, options);
-          // Pull the first frame before emitting anything: a handshake failure
-          // must stay invisible so the SSE retry below is seamless.
-          const first = await events.next();
-          started = true;
-          out.push({ type: "start", partial: output });
-
-          const all = (async function* () {
-            if (!first.done) yield first.value;
-            yield* events;
-          })();
-          await processResponsesStream(all, output, out, model);
-
-          if (options?.signal?.aborted) throw new Error("Request was aborted");
-          if (output.stopReason === "aborted" || output.stopReason === "error") {
-            throw new Error(output.errorMessage ?? "An unknown error occurred");
-          }
-
-          breaker.recordSuccess(providerId);
-          out.push({ type: "done", reason: output.stopReason, message: output });
-          out.end();
-          return;
         } catch (error) {
-          const failed = error instanceof Error ? error : new Error(String(error));
-          if (!started && failed instanceof WebSocketUnavailableError) {
-            breaker.recordFailure(providerId, failed);
-            // Fall through to SSE — nothing has been emitted yet.
-          } else {
-            output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-            output.errorMessage = failed.message;
-            out.push({ type: "error", reason: output.stopReason, error: output });
+          emitFailure(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+
+        for (let attempt = 1; attempt <= WS_ATTEMPTS; attempt++) {
+          const output = emptyAssistantMessage(model);
+          try {
+            const events = streamEvents(model, params, options);
+            // Pull the first frame before emitting anything: a handshake
+            // failure must stay invisible so the retry below is seamless.
+            const first = await events.next();
+            if (!startEmitted) {
+              startEmitted = true;
+              out.push({ type: "start", partial: output });
+            }
+
+            const all = (async function* () {
+              if (!first.done) yield first.value;
+              yield* events;
+            })();
+            await processResponsesStream(all, output, out, model);
+
+            if (options?.signal?.aborted) throw new Error("Request was aborted");
+            if (output.stopReason === "aborted" || output.stopReason === "error") {
+              throw new Error(output.errorMessage ?? "An unknown error occurred");
+            }
+
+            breaker.recordSuccess(providerId);
+            out.push({ type: "done", reason: output.stopReason, message: output });
             out.end();
             return;
+          } catch (error) {
+            const failed = error instanceof Error ? error : new Error(String(error));
+            if (options?.signal?.aborted || !isTransportError(failed)) {
+              // The user aborted, or the server itself rejected/failed the
+              // response — retrying would re-pay for the same failure.
+              emitFailure(failed);
+              return;
+            }
+            breaker.recordFailure(providerId, failed);
+            if (attempt < WS_ATTEMPTS && breaker.allows(providerId)) {
+              console.warn(
+                `[${providerId}] websocket attempt ${attempt} failed (${failed.message}) — retrying`,
+              );
+              await delay(RETRY_DELAY_MS, options?.signal);
+              if (options?.signal?.aborted) {
+                emitFailure(new Error("Request was aborted"));
+                return;
+              }
+              continue;
+            }
+            console.warn(
+              `[${providerId}] websocket failed (${failed.message}) — falling back to SSE for this request`,
+            );
+            break;
           }
         }
       }
 
-      // SSE path: pi's own implementation, piped through untouched.
+      // SSE path: pi's own implementation, piped through untouched — except a
+      // duplicate `start` when a websocket attempt already emitted one.
       try {
         for await (const event of sse.streamSimple(model, context, options)) {
+          if (event.type === "start") {
+            if (startEmitted) continue;
+            startEmitted = true;
+          }
           out.push(event as AssistantMessageEvent);
         }
         out.end();
       } catch (error) {
-        const output = emptyAssistantMessage(model);
-        output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-        output.errorMessage = error instanceof Error ? error.message : String(error);
-        out.push({ type: "error", reason: output.stopReason, error: output });
-        out.end();
+        emitFailure(error instanceof Error ? error : new Error(String(error)));
       }
     })();
 

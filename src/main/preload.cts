@@ -29,6 +29,7 @@ const bridge: PiBridge = {
 
   prompt: (text: string) => ipcRenderer.invoke("pi:prompt", text),
   abort: () => ipcRenderer.invoke("pi:abort"),
+  compact: () => ipcRenderer.invoke("pi:compact"),
 
   newSession: (input: NewChatInput) => ipcRenderer.invoke("pi:session-new", input),
   checkProjectName: (name: string) => ipcRenderer.invoke("pi:project-check-name", name),

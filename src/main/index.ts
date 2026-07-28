@@ -87,6 +87,10 @@ app.whenReady().then(async () => {
     await service.abort();
     return state();
   });
+  ipcMain.handle("pi:compact", async () => {
+    await service.compact();
+    return state();
+  });
 
   ipcMain.handle("pi:session-new", async (_e, input: NewChatInput) => {
     await service.newSession(input);

@@ -133,6 +133,16 @@ export function SettingsDialog({
                   onChange={(showTokenUsage) => onUpdate({ showTokenUsage })}
                 />
               </SettingRow>
+
+              <SettingRow
+                title="Auto-compact conversations"
+                description="When a chat nears the model's context limit, older messages are summarized automatically so the conversation can keep going. You can always compact manually from the composer."
+              >
+                <Toggle
+                  checked={behavior.autoCompact}
+                  onChange={(autoCompact) => onUpdate({ autoCompact })}
+                />
+              </SettingRow>
             </div>
           )}
 

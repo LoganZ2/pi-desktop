@@ -124,6 +124,12 @@ export const IconCube = (p: IconProps) => (
   </Svg>
 );
 
+export const IconCompress = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m7 20 5-5 5 5M7 4l5 5 5-5" />
+  </Svg>
+);
+
 export const IconShield = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6Z" />
