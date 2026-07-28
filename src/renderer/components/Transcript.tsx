@@ -78,6 +78,7 @@ export function Transcript({
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const scrollRaf = useRef<number>(0);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -85,12 +86,19 @@ export function Transcript({
     const onScroll = () => {
       pinned.current = node.scrollHeight - node.scrollTop - node.clientHeight < 140;
     };
-    node.addEventListener("scroll", onScroll);
+    node.addEventListener("scroll", onScroll, { passive: true });
     return () => node.removeEventListener("scroll", onScroll);
   }, []);
 
   useEffect(() => {
-    if (pinned.current) bottomRef.current?.scrollIntoView({ block: "end" });
+    if (!pinned.current || !scrollRef.current) return;
+    // Use rAF so multiple rapid updates batch into a single frame — avoids
+    // jitter when streaming content fights with manual scroll position.
+    cancelAnimationFrame(scrollRaf.current);
+    const node = scrollRef.current;
+    scrollRaf.current = requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+    });
   }, [messages, streaming, toolRuns, approvals]);
 
   const results = new Map<string, ChatMessage>();
