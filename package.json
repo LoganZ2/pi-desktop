@@ -12,6 +12,7 @@
     "icon": "electron scripts/make-icon.mjs",
     "dist": "npm run build && electron-builder"
   },
+  "author": "LoganZ2 <logan-z2@outlook.com>",
   "license": "MIT",
   "build": {
     "appId": "com.pi-desktop.app",
@@ -39,7 +40,9 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "icon": "assets/icon.png",
-      "category": "Development"
+      "category": "Development",
+      "desktopName": "pi-desktop",
+      "syncDesktopName": true
     }
   },
   "dependencies": {
