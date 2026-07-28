@@ -38,11 +38,7 @@
       "icon": "assets/icon.png"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
-      "icon": "assets/icon.png",
-      "category": "Development",
-      "desktopName": "pi-desktop",
-      "syncDesktopName": true
+      "target": ["AppImage", "deb"]
     }
   },
   "dependencies": {
