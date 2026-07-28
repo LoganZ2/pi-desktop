@@ -34,30 +34,11 @@ jobs:
       - name: Build app
         run: npm run build
 
-      - name: Import Apple signing certificate
-        if: matrix.platform == 'mac'
-        run: |
-          if [ -n "$CERT_BASE64" ]; then
-            echo "$CERT_BASE64" | base64 -d > /tmp/cert.p12
-            security create-keychain -p ci-build build.keychain
-            security default-keychain -s build.keychain
-            security unlock-keychain -p ci-build build.keychain
-            security import /tmp/cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
-            security set-key-partition-list -S apple-tool:,apple: -s -k ci-build build.keychain
-          fi
-        env:
-          CERT_BASE64: ${{ secrets.MAC_CSC_LINK }}
-          CERT_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-
       - name: Package (mac)
         if: matrix.platform == 'mac'
         run: npx electron-builder --mac --publish never
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - name: Package (win)
         if: matrix.platform == 'win'
