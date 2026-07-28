@@ -133,7 +133,7 @@ export function Transcript({
         kind: "user",
         node: (
           <div className="flex justify-end">
-            <div className="max-w-[80%] rounded-2xl rounded-br-md border border-iris-500/25 bg-iris-600/15 px-3.5 py-2.5 text-[14px] whitespace-pre-wrap text-mist-100">
+            <div className="max-w-[80%] overflow-hidden rounded-2xl rounded-br-md border border-iris-500/25 bg-iris-600/15 px-3.5 py-2.5 text-[14px] whitespace-pre-wrap break-words text-mist-100">
               {contentToText(message.content) || String(message.content ?? "")}
             </div>
           </div>

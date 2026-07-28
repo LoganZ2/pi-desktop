@@ -82,7 +82,7 @@ export function Composer({
 
   const submit = () => {
     const text = value.trim();
-    if (!text || disabled) return;
+    if (!text || disabled || isStreaming) return;
     onSend(text);
     setValue("");
   };
@@ -110,7 +110,7 @@ export function Composer({
             ref={textareaRef}
             rows={1}
             value={value}
-            disabled={disabled}
+            disabled={disabled || isStreaming}
             onChange={(e) => setValue(e.target.value)}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
@@ -128,7 +128,7 @@ export function Composer({
                 : !session
                   ? "Start a chat to begin…"
                   : isStreaming
-                    ? "Send another message to steer the agent…"
+                    ? "Agent is working…"
                     : "Ask the agent to build, fix, or explain something…"
             }
             className="max-h-[200px] w-full resize-none bg-transparent px-4 pt-3.5 pb-2 text-[14px] text-mist-100 outline-none placeholder:text-mist-500 disabled:cursor-not-allowed"
@@ -280,7 +280,7 @@ export function Composer({
               <button
                 type="button"
                 onClick={submit}
-                disabled={!value.trim() || disabled}
+                disabled={!value.trim() || disabled || isStreaming}
                 title="Send"
                 className="flex h-8 w-8 items-center justify-center rounded-xl bg-iris-600 text-white transition hover:bg-iris-500 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
               >
