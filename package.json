@@ -9,9 +9,39 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/renderer/tsconfig.json",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --dev",
-    "icon": "electron scripts/make-icon.mjs"
+    "icon": "electron scripts/make-icon.mjs",
+    "dist": "npm run build && electron-builder"
   },
   "license": "MIT",
+  "build": {
+    "appId": "com.pi-desktop.app",
+    "productName": "pi desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/icon.png"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "assets/icon.png",
+      "category": "Development"
+    }
+  },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.82.1",
     "@earendil-works/pi-ai": "^0.82.1",
@@ -26,6 +56,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2"

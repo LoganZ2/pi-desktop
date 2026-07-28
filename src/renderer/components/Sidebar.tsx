@@ -46,10 +46,14 @@ export function Sidebar({
 
   return (
     <aside className="flex w-[248px] shrink-0 flex-col border-r border-ink-800 bg-ink-900">
-      <div className="drag-region flex h-14 items-center justify-between pr-3 pl-20">
-        <span className="text-[11px] font-semibold tracking-widest text-mist-500 uppercase">
-          Chats
-        </span>
+      <div
+        className={cx(
+          "drag-region flex h-14 items-center justify-between pr-3",
+          // macOS traffic lights sit on the left; other platforms use a native title bar.
+          window.pi.platform === "darwin" ? "pl-20" : "pl-3",
+        )}
+      >
+        <span />
         <button
           type="button"
           onClick={onNew}

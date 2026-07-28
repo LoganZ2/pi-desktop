@@ -187,6 +187,7 @@ export const CH_STATE = "pi:state";
 
 /** API exposed by the preload bridge as `window.pi`. */
 export interface PiBridge {
+  platform: string;
   getState(): Promise<AppState>;
 
   // chat

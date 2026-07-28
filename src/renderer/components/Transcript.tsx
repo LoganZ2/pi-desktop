@@ -77,21 +77,31 @@ export function Transcript({
 }: TranscriptProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** User is close enough to the bottom that we should auto-scroll. */
   const pinned = useRef(true);
+  /**
+   * If the user intentionally scrolls away, lock auto-scroll off until they
+   * manually scroll all the way back to the bottom. This prevents streaming
+   * content from fighting the user when they are reading earlier messages.
+   */
+  const locked = useRef(false);
   const scrollRaf = useRef<number>(0);
 
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
     const onScroll = () => {
-      pinned.current = node.scrollHeight - node.scrollTop - node.clientHeight < 140;
+      const dist = node.scrollHeight - node.scrollTop - node.clientHeight;
+      pinned.current = dist < 36;
+      if (dist <= 2) locked.current = false;
+      else if (dist > 36) locked.current = true;
     };
     node.addEventListener("scroll", onScroll, { passive: true });
     return () => node.removeEventListener("scroll", onScroll);
   }, []);
 
   useEffect(() => {
-    if (!pinned.current || !scrollRef.current) return;
+    if (!pinned.current || locked.current || !scrollRef.current) return;
     // Use rAF so multiple rapid updates batch into a single frame — avoids
     // jitter when streaming content fights with manual scroll position.
     cancelAnimationFrame(scrollRaf.current);

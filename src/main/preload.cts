@@ -24,6 +24,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const bridge: PiBridge = {
+  platform: process.platform,
   getState: () => ipcRenderer.invoke("pi:get-state"),
 
   prompt: (text: string) => ipcRenderer.invoke("pi:prompt", text),
