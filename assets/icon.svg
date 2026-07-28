@@ -1,0 +1,40 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pi desktop">
+  <title>pi desktop</title>
+  <defs>
+    <!-- Matte black with a faint diagonal fall-off, so the surface has depth
+         without any bloom. -->
+    <linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1024" y2="1024">
+      <stop offset="0" stop-color="#15171e" />
+      <stop offset="0.55" stop-color="#0b0d11" />
+      <stop offset="1" stop-color="#06070a" />
+    </linearGradient>
+
+    <linearGradient id="glyph" gradientUnits="userSpaceOnUse" x1="240" y1="310" x2="780" y2="700">
+      <stop offset="0" stop-color="#c3c9ff" />
+      <stop offset="0.55" stop-color="#7c8aff" />
+      <stop offset="1" stop-color="#5566f2" />
+    </linearGradient>
+
+    <!-- Hairline edge, brightest at the top — an edge, not a light source. -->
+    <linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="512" y1="0" x2="512" y2="1024">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16" />
+      <stop offset="0.4" stop-color="#ffffff" stop-opacity="0.04" />
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)" />
+
+  <!-- Drawn as shapes rather than text, so the icon needs no font at any size.
+       Both stems tilt outward and the right one bends through its lower half
+       into a swept foot, the way the letter is actually drawn. Each stem is a
+       closed path so its foot can sit flat on the baseline, and both narrow
+       slightly toward the bottom the way a drawn stroke does. The stems run up
+       under the bar, hiding their tops. -->
+  <g fill="url(#glyph)">
+    <rect x="240" y="310" width="540" height="100" rx="16" />
+    <path d="M320 392 L420 392 L380 700 L280 700 Z" />
+    <path d="M575 392 L690 392 C690 540 700 612 745 700 L630 700 C590 612 575 540 575 392 Z" />
+  </g>
+  <rect x="2" y="2" width="1020" height="1020" rx="227" fill="none" stroke="url(#rim)" stroke-width="4" />
+</svg>

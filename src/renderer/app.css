@@ -1,0 +1,212 @@
+@import "tailwindcss";
+@source "./";
+
+@theme {
+  --color-ink-950: #08090c;
+  --color-ink-900: #0d0f14;
+  --color-ink-850: #12151b;
+  --color-ink-800: #171b23;
+  --color-ink-750: #1d222c;
+  --color-ink-700: #262c38;
+  --color-ink-600: #333a49;
+
+  --color-mist-500: #6f7688;
+  --color-mist-400: #8e95a7;
+  --color-mist-300: #aeb5c4;
+  --color-mist-200: #ccd1dc;
+  --color-mist-100: #e7e9f0;
+
+  --color-iris-600: #5766f5;
+  --color-iris-500: #7180ff;
+  --color-iris-400: #929cff;
+
+  --color-jade-400: #5fd39a;
+  --color-amber-soft: #f0c274;
+  --color-rose-soft: #ff8b8b;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --radius-xl2: 1rem;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  :root {
+    /* Without this Chromium paints native controls — number spinners, date
+       pickers, autofill — in their light theme. */
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ink-950);
+    color: var(--color-mist-100);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-iris-500) 35%, transparent);
+  }
+
+  /* Slim scrollbars that fade into the surface. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-ink-700);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-600);
+    background-clip: content-box;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  input,
+  textarea {
+    font-family: inherit;
+  }
+
+  /* Spinner arrows clash with the custom field styling. */
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer components {
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  /* Rendered markdown from assistant messages. */
+  .prose-pi {
+    word-break: break-word;
+  }
+  .prose-pi > * + * {
+    margin-top: 0.75rem;
+  }
+  .prose-pi p {
+    margin: 0;
+  }
+  .prose-pi h3,
+  .prose-pi h4,
+  .prose-pi h5,
+  .prose-pi h6 {
+    font-weight: 600;
+    color: var(--color-mist-100);
+    margin-top: 1.25rem;
+  }
+  .prose-pi h3 {
+    font-size: 1.05rem;
+  }
+  .prose-pi ul,
+  .prose-pi ol {
+    padding-left: 1.35rem;
+    margin: 0;
+  }
+  .prose-pi ul {
+    list-style: disc;
+  }
+  .prose-pi ol {
+    list-style: decimal;
+  }
+  .prose-pi li::marker {
+    color: var(--color-mist-500);
+  }
+  .prose-pi li + li {
+    margin-top: 0.25rem;
+  }
+  .prose-pi code {
+    font-family: var(--font-mono);
+    font-size: 0.82em;
+    background: var(--color-ink-800);
+    border: 1px solid var(--color-ink-700);
+    border-radius: 5px;
+    padding: 0.1em 0.35em;
+  }
+  .prose-pi pre {
+    background: var(--color-ink-900);
+    border: 1px solid var(--color-ink-700);
+    border-radius: 12px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+  }
+  .prose-pi pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.8rem;
+    line-height: 1.6;
+  }
+  .prose-pi a {
+    color: var(--color-iris-400);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .prose-pi blockquote {
+    border-left: 2px solid var(--color-ink-700);
+    padding-left: 0.9rem;
+    color: var(--color-mist-400);
+  }
+  .prose-pi hr {
+    border: none;
+    border-top: 1px solid var(--color-ink-700);
+  }
+}
+
+@utility animate-fade-up {
+  animation: fade-up 0.22s ease-out;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility animate-pulse-soft {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

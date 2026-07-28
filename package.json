@@ -1,0 +1,33 @@
+{
+  "name": "pi-desktop",
+  "version": "0.1.0",
+  "description": "Desktop coding agent built on the pi agent framework (@earendil-works/pi-agent-core) and Electron",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p src/renderer/tsconfig.json",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev",
+    "icon": "electron scripts/make-icon.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.82.1",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "@types/ws": "^8.18.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "electron": "^43.2.0",
+    "esbuild": "^0.28.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2"
+  }
+}
