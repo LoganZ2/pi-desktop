@@ -63,6 +63,7 @@ export function Composer({
 
   const { behavior, session, models, isStreaming, isCompacting, contextUsage, stats } = state;
   const disabled = !activeModel || !session;
+  const isCustomModel = activeModel?.isCustom === true;
 
   const contextPct =
     contextUsage.contextWindow > 0
@@ -268,7 +269,7 @@ export function Composer({
 
             <div className="flex-1" />
 
-            {behavior.showTokenUsage && stats.tokens > 0 && (
+            {behavior.showTokenUsage && !isCustomModel && stats.tokens > 0 && (
               <span className="mr-1 font-mono text-[11px] text-mist-500">
                 {formatTokens(stats.tokens)} tok · ${stats.cost.toFixed(4)}
               </span>
@@ -276,11 +277,15 @@ export function Composer({
 
             {session && contextUsage.tokens > 0 && contextUsage.contextWindow > 0 && (
               <span
-                title={`≈${formatTokens(contextUsage.tokens)} of ${formatTokens(contextUsage.contextWindow)} context tokens in use${
-                  behavior.autoCompact && contextUsage.compactAt > 0
-                    ? ` · auto-compacts around ${formatTokens(contextUsage.compactAt)}`
-                    : ""
-                }`}
+                title={
+                  isCustomModel
+                    ? `${contextPct}% of context in use`
+                    : `≈${formatTokens(contextUsage.tokens)} of ${formatTokens(contextUsage.contextWindow)} context tokens in use${
+                        behavior.autoCompact && contextUsage.compactAt > 0
+                          ? ` · auto-compacts around ${formatTokens(contextUsage.compactAt)}`
+                          : ""
+                      }`
+                }
                 className={cx(
                   "mr-0.5 font-mono text-[11px]",
                   contextPressure >= 1
