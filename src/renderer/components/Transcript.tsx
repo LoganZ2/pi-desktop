@@ -588,7 +588,14 @@ export function Transcript({
     const base = `${rowIndex}-${message.timestamp ?? ""}`;
 
     if (message.role === "user") {
-      // Before the new user, if the previous turn had changes, inject them
+      // Before the new user, if the previous turn had changes, inject them.
+      // Any compaction markers that were just appended belong to the same
+      // boundary; move them below the changes card.
+      const trailingCompactions: Item[] = [];
+      while (items.length > 0 && items[items.length - 1].kind === "compaction") {
+        trailingCompactions.unshift(items.pop()!);
+      }
+
       if (lastUserMessage?.entryId) {
         const change = changesByTurnId.get(lastUserMessage.entryId);
         if (change) {
@@ -600,6 +607,8 @@ export function Transcript({
         }
       }
       lastUserMessage = message;
+
+      items.push(...trailingCompactions);
 
       items.push({
         key: `${base}-user`,
@@ -649,6 +658,7 @@ export function Transcript({
         });
       }
     });
+
   });
 
   // Inject changes after the last user before streaming
