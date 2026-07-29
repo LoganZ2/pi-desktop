@@ -141,7 +141,32 @@ export interface ChatMessage {
   toolName?: string;
   isError?: boolean;
   usage?: { input: number; output: number; cost?: { total: number } };
+  /** Session-tree entry backing this rendered message. Present after persistence. */
+  entryId?: string;
+  /** Alternate user-message branches that share the same parent entry. */
+  branch?: {
+    index: number;
+    count: number;
+    targets: string[];
+  };
   [key: string]: unknown;
+}
+
+export interface FileChange {
+  path: string;
+  status: "added" | "modified" | "deleted";
+  addedLines?: number;
+  removedLines?: number;
+}
+
+export interface TurnChangesNotice {
+  /** User message entry that started this turn. */
+  turnId: string;
+  /** Final assistant entry after which the card is rendered. */
+  afterEntryId: string;
+  files: FileChange[];
+  canUndo: boolean;
+  undone: boolean;
 }
 
 export interface CompactionNotice {
@@ -174,6 +199,8 @@ export interface AppState {
   activeSessionPath: string | null;
   messages: ChatMessage[];
   compactions: CompactionNotice[];
+  turnChanges: TurnChangesNotice[];
+  pendingApprovals: ApprovalRequest[];
   isStreaming: boolean;
   isCompacting: boolean;
   contextUsage: ContextUsage;
@@ -222,6 +249,9 @@ export interface PiBridge {
 
   // chat
   prompt(text: string): Promise<{ steered: boolean }>;
+  editMessage(entryId: string, text: string): Promise<AppState>;
+  switchBranch(targetId: string): Promise<AppState>;
+  undoLatestChanges(turnId: string): Promise<AppState>;
   abort(): Promise<AppState>;
   compact(): Promise<AppState>;
 

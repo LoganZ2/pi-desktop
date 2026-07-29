@@ -28,6 +28,9 @@ const bridge: PiBridge = {
   getState: () => ipcRenderer.invoke("pi:get-state"),
 
   prompt: (text: string) => ipcRenderer.invoke("pi:prompt", text),
+  editMessage: (entryId: string, text: string) => ipcRenderer.invoke("pi:edit-message", entryId, text),
+  switchBranch: (targetId: string) => ipcRenderer.invoke("pi:switch-branch", targetId),
+  undoLatestChanges: (turnId: string) => ipcRenderer.invoke("pi:undo-changes", turnId),
   abort: () => ipcRenderer.invoke("pi:abort"),
   compact: () => ipcRenderer.invoke("pi:compact"),
 

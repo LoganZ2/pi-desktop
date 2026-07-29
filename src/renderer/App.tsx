@@ -43,6 +43,9 @@ export function App() {
     setState(next);
     setMessages(next.messages);
     setIsStreaming(next.isStreaming);
+    setApprovals(
+      Object.fromEntries(next.pendingApprovals.map((request) => [request.toolCallId, request])),
+    );
   }, []);
 
   const refresh = useCallback(async () => {
@@ -146,8 +149,31 @@ export function App() {
       applyState(await window.pi.compact());
     } catch (error) {
       console.error("compaction failed:", error);
-      // The main process pushed isCompacting=true at the start; re-sync so the
-      // composer never sticks in the compacting state after a failure.
+      void refresh();
+    }
+  };
+
+  const editAndResend = async (entryId: string, text: string) => {
+    try {
+      applyState(await window.pi.editMessage(entryId, text));
+    } catch (error) {
+      console.error("edit failed:", error);
+    }
+  };
+
+  const switchBranch = async (targetId: string) => {
+    try {
+      applyState(await window.pi.switchBranch(targetId));
+    } catch (error) {
+      console.error("branch switch failed:", error);
+    }
+  };
+
+  const undoLatest = async (turnId: string) => {
+    try {
+      applyState(await window.pi.undoLatestChanges(turnId));
+    } catch (error) {
+      console.error("undo failed:", error);
       void refresh();
     }
   };
@@ -230,11 +256,16 @@ export function App() {
           <Transcript
             messages={messages}
             compactions={state.compactions}
+            turnChanges={state.turnChanges}
             streaming={streaming}
+            isStreaming={isStreaming}
             toolRuns={toolRuns}
             approvals={approvals}
             autoExpandThinking={state.behavior.autoExpandThinking}
             onApprove={respondApproval}
+            onEditMessage={editAndResend}
+            onSwitchBranch={switchBranch}
+            onUndoChanges={undoLatest}
           />
         ) : (
           <div className="flex flex-1 items-center justify-center px-6">

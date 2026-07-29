@@ -87,6 +87,18 @@ app.whenReady().then(async () => {
     await service.abort();
     return state();
   });
+  ipcMain.handle("pi:edit-message", async (_e, entryId: string, text: string) => {
+    await service.editMessage(entryId, text);
+    return state();
+  });
+  ipcMain.handle("pi:switch-branch", async (_e, targetId: string) => {
+    await service.switchBranch(targetId);
+    return state();
+  });
+  ipcMain.handle("pi:undo-changes", async (_e, turnId: string) => {
+    await service.undoLatestChanges(turnId);
+    return state();
+  });
   ipcMain.handle("pi:compact", async () => {
     await service.compact();
     return state();

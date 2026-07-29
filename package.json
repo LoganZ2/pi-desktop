@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Desktop coding agent built on the pi agent framework (@earendil-works/pi-agent-core) and Electron",
   "type": "module",
   "main": "dist/main/index.js",
@@ -31,18 +31,29 @@
     ],
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "icon": "assets/icon.icns",
       "category": "public.app-category.developer-tools",
       "identity": null
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "assets/icon.png"
     },
     "linux": {
-      "target": ["AppImage", "deb"]
+      "target": [
+        "AppImage",
+        "deb"
+      ]
     }
   },
   "dependencies": {

@@ -30,11 +30,13 @@ import type {
   ContextUsage,
   CustomModelEdit,
   CustomProviderInput,
+  FileChange,
   NewChatInput,
   ProjectNameCheck,
   ProviderOption,
   SessionSettings,
   ThinkingLevel,
+  TurnChangesNotice,
 } from "../shared/ipc.js";
 import type { EncryptedCredentialStore } from "./credentials.js";
 import { maybeRegisterFauxDemo } from "./faux-demo.js";
@@ -43,8 +45,31 @@ import { checkProjectName, createProject } from "./projects.js";
 import type { ConfigStore } from "./config-store.js";
 import type { ModelStore } from "./model-store.js";
 import { SessionManager, titleFromPrompt } from "./session-manager.js";
+import { TurnCheckpoint, type FinishedTurnCheckpoint } from "./turn-checkpoint.js";
 
 type Tools = AgentHarnessTool<ExecutionToolContext>[];
+
+const TURN_CHANGES_ENTRY = "pi-desktop:turn-changes";
+const FILE_UNDO_MESSAGE = "pi-desktop:file-undo";
+
+interface StoredTurnChanges {
+  turnId: string;
+  afterEntryId: string;
+  files: FileChange[];
+}
+
+interface LatestTurnCheckpoint {
+  turnId: string;
+  checkpoint: FinishedTurnCheckpoint;
+}
+
+interface BackgroundSession {
+  session: Session<JsonlSessionMetadata>;
+  harness: AgentHarness<ExecutionToolContext>;
+  settings: SessionSettings;
+  env: NodeExecutionEnv;
+  streaming: boolean;
+}
 
 export class AgentService {
   private readonly registry: ModelRegistry;
@@ -54,10 +79,18 @@ export class AgentService {
   private session: Session<JsonlSessionMetadata> | null = null;
   private messages: ChatMessage[] = [];
   private compactions: CompactionNotice[] = [];
-  private pendingApprovals = new Map<string, (allow: boolean) => void>();
+  private turnChanges: TurnChangesNotice[] = [];
+  private pendingApprovals = new Map<
+    string,
+    { resolve: (allow: boolean) => void; request: ApprovalRequest; sessionPath: string }
+  >();
   private streaming = false;
   private compacting = false;
   private compactionPromise: Promise<void> | null = null;
+  private readonly afterRunPromises = new Map<string, Promise<void>>();
+  private readonly turnCheckpoints = new Map<string, TurnCheckpoint>();
+  private readonly backgroundSessions = new Map<string, BackgroundSession>();
+  private readonly latestCheckpoints = new Map<string, LatestTurnCheckpoint>();
   private stats = { tokens: 0, cost: 0 };
   private contextUsage: ContextUsage = {
     tokens: 0,
@@ -95,9 +128,9 @@ export class AgentService {
   }
 
   /** Point the tools at this chat's folder. */
-  private useWorkspace(workspace: string): void {
-    if (this.env.cwd === workspace) return;
-    void this.env.cleanup();
+  private useWorkspace(workspace: string, preserveCurrent = false): void {
+    if (this.env.cwd === workspace && !preserveCurrent) return;
+    if (!preserveCurrent) void this.env.cleanup();
     this.env = new NodeExecutionEnv({ cwd: workspace });
   }
 
@@ -149,30 +182,50 @@ export class AgentService {
     return [createReadTool(), createBashTool(), createEditTool(), createWriteTool()] as Tools;
   }
 
-  private createHarness(session: Session<JsonlSessionMetadata>): AgentHarness<ExecutionToolContext> | null {
+  private createHarness(
+    session: Session<JsonlSessionMetadata>,
+    sessionPath: string,
+  ): AgentHarness<ExecutionToolContext> | null {
     const model = this.registry.resolve(this.activeKey);
     if (!model) return null;
 
+    const harnessEnv = this.env;
     const harness = new AgentHarness<ExecutionToolContext>({
       session,
       models: this.registry.models,
       model,
       thinkingLevel: clampThinkingLevel(model, this.config.behavior.thinkingLevel),
       tools: this.buildTools(),
-      toolContext: () => ({ env: this.env }),
+      toolContext: () => ({ env: harnessEnv }),
       systemPrompt: () => this.systemPrompt(),
     });
 
     harness.subscribe((event) => {
-      this.handleEvent(event);
+      this.handleEvent(event, sessionPath, session, harness);
     });
     harness.on("tool_call", async (event) => {
-      if (event.toolName !== "bash" || this.sessionSettings?.approvalMode === "auto") return;
+      if (
+        (event.toolName === "edit" || event.toolName === "write") &&
+        typeof event.input?.path === "string"
+      ) {
+        await this.turnCheckpoints.get(sessionPath)?.captureToolPath(event.input.path);
+      }
+
+      const settings =
+        this.config.activeSessionPath === sessionPath
+          ? this.sessionSettings
+          : this.backgroundSessions.get(sessionPath)?.settings;
+      if (event.toolName !== "bash" || settings?.approvalMode === "auto") return;
       const command =
         typeof event.input?.command === "string"
           ? event.input.command
           : JSON.stringify(event.input ?? {});
-      const allowed = await this.requestApproval(event.toolCallId, event.toolName, command);
+      const allowed = await this.requestApproval(
+        event.toolCallId,
+        event.toolName,
+        command,
+        sessionPath,
+      );
       return allowed
         ? undefined
         : { block: true, reason: "The user denied this command in the approval prompt." };
@@ -180,45 +233,127 @@ export class AgentService {
     return harness;
   }
 
-  private handleEvent(event: AgentHarnessEvent): void {
+  private handleEvent(
+    event: AgentHarnessEvent,
+    sessionPath: string,
+    session: Session<JsonlSessionMetadata>,
+    harness: AgentHarness<ExecutionToolContext>,
+  ): void {
+    const isActive = this.config.activeSessionPath === sessionPath && this.harness === harness;
+    const background = this.backgroundSessions.get(sessionPath);
+
     switch (event.type) {
       case "agent_start":
-        this.streaming = true;
+        if (isActive) this.streaming = true;
+        else if (background) background.streaming = true;
         break;
-      case "agent_end":
-        this.streaming = false;
-        void this.afterRun();
+      case "agent_end": {
+        if (isActive) this.streaming = false;
+        else if (background) background.streaming = false;
+        const checkpoint = this.turnCheckpoints.get(sessionPath) ?? null;
+        this.turnCheckpoints.delete(sessionPath);
+        const promise = this.afterRun(sessionPath, session, harness, checkpoint);
+        this.afterRunPromises.set(sessionPath, promise);
+        void promise
+          .catch((error) => console.warn("Could not finalize agent run:", error))
+          .finally(() => {
+            if (this.afterRunPromises.get(sessionPath) === promise) {
+              this.afterRunPromises.delete(sessionPath);
+            }
+          });
         break;
+      }
       case "message_end": {
-        const message = event.message as ChatMessage;
-        this.messages = [...this.messages, message];
+        if (isActive) {
+          const message = event.message as ChatMessage;
+          this.messages = [...this.messages, message];
+        }
         break;
       }
       case "session_compact":
-        this.compactions = [
-          ...this.compactions.filter((notice) => notice.id !== event.compactionEntry.id),
-          {
-            id: event.compactionEntry.id,
-            afterMessageCount: this.messages.length,
-            timestamp: event.compactionEntry.timestamp,
-            summary: event.compactionEntry.summary,
-            tokensBefore: event.compactionEntry.tokensBefore,
-          },
-        ];
+        if (isActive) {
+          this.compactions = [
+            ...this.compactions.filter((notice) => notice.id !== event.compactionEntry.id),
+            {
+              id: event.compactionEntry.id,
+              afterMessageCount: this.messages.length,
+              timestamp: event.compactionEntry.timestamp,
+              summary: event.compactionEntry.summary,
+              tokensBefore: event.compactionEntry.tokensBefore,
+            },
+          ];
+        }
         break;
       default:
         break;
     }
-    this.onEvent?.(event);
+    if (isActive) this.onEvent?.(event);
   }
 
-  private async afterRun(): Promise<void> {
-    await this.refreshStats();
-    await this.refreshContextUsage();
-    const sessionPath = this.config.activeSessionPath;
-    if (sessionPath) this.sessions.touch(sessionPath, this.messages.length);
+  private async afterRun(
+    sessionPath: string,
+    session: Session<JsonlSessionMetadata>,
+    harness: AgentHarness<ExecutionToolContext>,
+    checkpoint: TurnCheckpoint | null,
+  ): Promise<void> {
+    if (checkpoint) {
+      try {
+        const finished = await checkpoint.finish();
+        const entries = await session.getEntries();
+        const byId = new Map(entries.map((entry) => [entry.id, entry]));
+        const branch: SessionTreeEntry[] = [];
+        let cursor = byId.get((await session.getLeafId()) ?? "");
+        while (cursor) {
+          branch.unshift(cursor);
+          cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+        }
+        const latestUser = [...branch]
+          .reverse()
+          .find(
+            (entry) =>
+              entry.type === "message" &&
+              (entry.message as ChatMessage).role === "user",
+          );
+        const latestAssistant = [...branch]
+          .reverse()
+          .find(
+            (entry) =>
+              entry.type === "message" &&
+              (entry.message as ChatMessage).role === "assistant",
+          );
+        if (
+          finished &&
+          latestUser?.type === "message" &&
+          latestAssistant?.type === "message"
+        ) {
+          const stored: StoredTurnChanges = {
+            turnId: latestUser.id,
+            afterEntryId: latestAssistant.id,
+            files: finished.files,
+          };
+          await session.appendCustomEntry(TURN_CHANGES_ENTRY, stored);
+          this.latestCheckpoints.set(sessionPath, {
+            turnId: latestUser.id,
+            checkpoint: finished,
+          });
+        }
+      } catch (error) {
+        console.warn("Could not finalize the turn checkpoint:", error);
+      }
+    }
+
+    const isActive = this.config.activeSessionPath === sessionPath && this.harness === harness;
+    if (isActive) {
+      await this.loadTranscript(session);
+      await this.refreshStats();
+      await this.refreshContextUsage();
+    }
+
+    const messageCount = (await session.getSessionStats()).messageCount;
+    this.sessions.touch(sessionPath, messageCount);
 
     if (
+      isActive &&
       this.config.behavior.autoCompact &&
       this.harness &&
       this.contextUsage.canCompact &&
@@ -323,11 +458,13 @@ export class AgentService {
     toolCallId: string,
     toolName: string,
     command: string,
+    sessionPath: string,
   ): Promise<boolean> {
     const approvalId = randomUUID();
+    const request = { approvalId, toolCallId, toolName, command };
     return new Promise<boolean>((resolve) => {
-      this.pendingApprovals.set(approvalId, resolve);
-      this.onApprovalRequest?.({ approvalId, toolCallId, toolName, command });
+      this.pendingApprovals.set(approvalId, { resolve, request, sessionPath });
+      if (this.config.activeSessionPath === sessionPath) this.onApprovalRequest?.(request);
     }).finally(() => {
       this.pendingApprovals.delete(approvalId);
     });
@@ -336,7 +473,7 @@ export class AgentService {
   respondApproval(approvalId: string, allow: boolean, always: boolean): void {
     // "Always" applies to this chat only, matching where the setting lives.
     if (always) void this.setApprovalMode("auto");
-    this.pendingApprovals.get(approvalId)?.(allow);
+    this.pendingApprovals.get(approvalId)?.resolve(allow);
   }
 
   // ---------- chat ----------
@@ -345,6 +482,7 @@ export class AgentService {
     if (!this.harness) throw new Error("Add a model before sending a message");
 
     const sessionPath = this.config.activeSessionPath;
+    if (!sessionPath) throw new Error("No chat is open");
     if (sessionPath && !this.sessions.hasTitle(sessionPath)) {
       await this.sessions.rename(sessionPath, titleFromPrompt(text), this.session ?? undefined);
       this.onStateChange?.();
@@ -354,6 +492,8 @@ export class AgentService {
       await this.harness.steer(text);
       return { steered: true };
     }
+    const pendingRun = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
+    if (pendingRun) await pendingRun;
     if (this.compactionPromise) await this.compactionPromise;
 
     await this.refreshContextUsage();
@@ -369,12 +509,77 @@ export class AgentService {
       await this.runCompaction();
     }
 
+    if (sessionPath) this.latestCheckpoints.delete(sessionPath);
+    const workspace = this.sessionSettings?.workspace ?? this.env.cwd;
+    this.turnCheckpoints.set(
+      sessionPath,
+      await TurnCheckpoint.begin(workspace, { env: this.env }),
+    );
+    this.onStateChange?.();
+
     void this.harness.prompt(text).catch((error) => {
       console.error("prompt failed:", error);
       this.streaming = false;
       this.onStateChange?.();
     });
     return { steered: false };
+  }
+
+  async editMessage(entryId: string, text: string): Promise<void> {
+    if (!this.harness || !this.session) throw new Error("No chat is open");
+    if (this.streaming || this.compacting) throw new Error("Wait for the agent to finish first");
+    const sessionPath = this.config.activeSessionPath;
+    const pendingRun = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
+    if (pendingRun) await pendingRun;
+    await this.harness.navigateTree(entryId);
+    await this.loadTranscript(this.session);
+    await this.refreshContextUsage();
+    await this.prompt(text);
+  }
+
+  async switchBranch(targetId: string): Promise<void> {
+    if (!this.harness || !this.session) throw new Error("No chat is open");
+    if (this.streaming || this.compacting) throw new Error("Wait for the agent to finish first");
+    const sessionPath = this.config.activeSessionPath;
+    const pendingRun = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
+    if (pendingRun) await pendingRun;
+    await this.harness.navigateTree(targetId);
+    await this.loadTranscript(this.session);
+    await this.refreshStats();
+    await this.refreshContextUsage();
+  }
+
+  async undoLatestChanges(turnId: string): Promise<void> {
+    if (!this.session) throw new Error("No chat is open");
+    if (this.streaming || this.compacting) throw new Error("Wait for the agent to finish first");
+    const metadata = await this.session.getMetadata();
+    const pendingRun = this.afterRunPromises.get(metadata.path);
+    if (pendingRun) await pendingRun;
+
+    const latest = this.latestCheckpoints.get(metadata.path);
+    const notice = this.turnChanges.find((change) => change.turnId === turnId);
+    if (!latest || latest.turnId !== turnId || !notice?.canUndo) {
+      throw new Error("Only the latest turn's changes can be undone");
+    }
+
+    await latest.checkpoint.undo();
+    const paths = notice.files.map((file) => file.path);
+    await this.session.appendCustomMessageEntry(
+      FILE_UNDO_MESSAGE,
+      [
+        "The user reverted all file changes made during the previous assistant turn.",
+        paths.length > 0 ? `Restored files: ${paths.join(", ")}.` : "",
+        "Do not assume the reverted edits are still present. Inspect the current files before making further changes.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      false,
+      { turnId, files: paths },
+    );
+    this.latestCheckpoints.delete(metadata.path);
+    await this.loadTranscript(this.session);
+    await this.refreshContextUsage();
+    this.onStateChange?.();
   }
 
   async compact(): Promise<void> {
@@ -384,13 +589,18 @@ export class AgentService {
   }
 
   async abort(): Promise<void> {
-    for (const resolve of this.pendingApprovals.values()) resolve(false);
+    const sessionPath = this.config.activeSessionPath;
+    for (const pending of this.pendingApprovals.values()) {
+      if (pending.sessionPath === sessionPath) pending.resolve(false);
+    }
     if (this.compactionPromise) {
-      // pi-agent-core compaction is not currently abortable. Waiting prevents a
-      // session switch from racing a summary write into the previous chat.
       await this.compactionPromise.catch(() => undefined);
     }
+    const pendingBeforeAbort = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
+    if (pendingBeforeAbort) await pendingBeforeAbort.catch(() => undefined);
     await this.harness?.abort();
+    const pendingAfterAbort = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
+    if (pendingAfterAbort) await pendingAfterAbort.catch(() => undefined);
     this.streaming = false;
   }
 
@@ -398,19 +608,66 @@ export class AgentService {
 
   private async loadTranscript(session: Session<JsonlSessionMetadata>): Promise<void> {
     let entries: SessionTreeEntry[] = [];
+    let leafId: string | null = null;
     try {
-      // The full append log keeps pre-compaction messages available to the UI;
-      // Session.buildContext() still uses pi's compacted active branch for LLM calls.
       entries = await session.getEntries();
+      leafId = await session.getLeafId();
     } catch (error) {
       console.warn("Could not read session transcript:", error);
     }
 
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    const entryOrder = new Map(entries.map((entry, index) => [entry.id, index]));
+    const activeEntries: SessionTreeEntry[] = [];
+    let cursor = leafId ? byId.get(leafId) : undefined;
+    while (cursor) {
+      activeEntries.unshift(cursor);
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+
+    // Leaf records only persist navigation bookkeeping; they are not branches
+    // users can select. Every other entry can be a valid navigateTree target.
+    const children = new Map<string | null, SessionTreeEntry[]>();
+    for (const entry of entries) {
+      if (entry.type === "leaf") continue;
+      const siblings = children.get(entry.parentId) ?? [];
+      siblings.push(entry);
+      children.set(entry.parentId, siblings);
+    }
+    const deepestTarget = (root: SessionTreeEntry): string => {
+      let best = root;
+      const stack = [root];
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        if ((entryOrder.get(current.id) ?? -1) > (entryOrder.get(best.id) ?? -1)) best = current;
+        for (const child of children.get(current.id) ?? []) stack.push(child);
+      }
+      return best.id;
+    };
+
     const messages: ChatMessage[] = [];
     const compactions: CompactionNotice[] = [];
-    for (const entry of entries) {
+    const storedChanges = new Map<string, StoredTurnChanges>();
+    const undoneTurns = new Set<string>();
+
+    for (const entry of activeEntries) {
       if (entry.type === "message") {
-        messages.push(entry.message as ChatMessage);
+        const message: ChatMessage = { ...(entry.message as ChatMessage), entryId: entry.id };
+        if (message.role === "user") {
+          const variants = (children.get(entry.parentId) ?? []).filter(
+            (candidate) =>
+              candidate.type === "message" &&
+              (candidate.message as ChatMessage).role === "user",
+          );
+          if (variants.length > 1) {
+            message.branch = {
+              index: variants.findIndex((candidate) => candidate.id === entry.id),
+              count: variants.length,
+              targets: variants.map(deepestTarget),
+            };
+          }
+        }
+        messages.push(message);
       } else if (entry.type === "compaction") {
         compactions.push({
           id: entry.id,
@@ -419,10 +676,36 @@ export class AgentService {
           summary: entry.summary,
           tokensBefore: entry.tokensBefore,
         });
+      } else if (entry.type === "custom" && entry.customType === TURN_CHANGES_ENTRY) {
+        const data = entry.data as StoredTurnChanges | undefined;
+        if (data?.turnId && data.afterEntryId && Array.isArray(data.files)) {
+          storedChanges.set(data.turnId, data);
+        }
+      } else if (entry.type === "custom_message" && entry.customType === FILE_UNDO_MESSAGE) {
+        const details = entry.details as { turnId?: string } | undefined;
+        if (details?.turnId) undoneTurns.add(details.turnId);
       }
     }
+
+    const metadata = await session.getMetadata();
+    const latestCheckpoint = this.latestCheckpoints.get(metadata.path);
+    const latestUser = [...messages].reverse().find((message) => message.role === "user");
+    const turnChanges: TurnChangesNotice[] = [...storedChanges.values()].map((change) => {
+      const undone = undoneTurns.has(change.turnId);
+      return {
+        ...change,
+        undone,
+        canUndo: Boolean(
+          !undone &&
+            latestUser?.entryId === change.turnId &&
+            latestCheckpoint?.turnId === change.turnId,
+        ),
+      };
+    });
+
     this.messages = messages;
     this.compactions = compactions;
+    this.turnChanges = turnChanges;
   }
 
   checkProjectName(name: string): ProjectNameCheck {
@@ -447,12 +730,14 @@ export class AgentService {
     this.useWorkspace(workspace);
     this.session = await this.sessions.create(workspace);
     await this.sessions.writeSettings(this.session, this.sessionSettings);
-    this.config.activeSessionPath = (await this.session.getMetadata()).path;
+    const sessionPath = (await this.session.getMetadata()).path;
+    this.config.activeSessionPath = sessionPath;
     this.messages = [];
     this.compactions = [];
+    this.turnChanges = [];
     this.stats = { tokens: 0, cost: 0 };
     this.contextUsage = { tokens: 0, contextWindow: 0, compactAt: 0, canCompact: false };
-    this.harness = this.createHarness(this.session);
+    this.harness = this.createHarness(this.session, sessionPath);
     await this.refreshContextUsage();
   }
 
@@ -464,23 +749,63 @@ export class AgentService {
     this.harness = null;
     this.messages = [];
     this.compactions = [];
+    this.turnChanges = [];
     this.stats = { tokens: 0, cost: 0 };
     this.contextUsage = { tokens: 0, contextWindow: 0, compactAt: 0, canCompact: false };
     this.config.activeSessionPath = null;
   }
 
   async openSession(sessionPath: string): Promise<void> {
-    await this.abort();
-    this.session = await this.sessions.open(sessionPath);
-    this.sessionSettings = await this.sessions.readSettings(this.session, {
-      workspace: this.config.behavior.projectsRoot,
-      approvalMode: this.config.behavior.defaultApprovalMode,
-    });
-    this.useWorkspace(this.sessionSettings.workspace);
+    if (sessionPath === this.config.activeSessionPath) return;
+    if (this.compactionPromise) await this.compactionPromise;
+
+    const currentPath = this.config.activeSessionPath;
+    if (
+      currentPath &&
+      this.session &&
+      this.harness &&
+      this.sessionSettings &&
+      this.streaming
+    ) {
+      this.backgroundSessions.set(currentPath, {
+        session: this.session,
+        harness: this.harness,
+        settings: this.sessionSettings,
+        env: this.env,
+        streaming: true,
+      });
+    }
+
+    // Mark the old harness inactive before opening the target session so any
+    // background events emitted during the filesystem reads are not forwarded
+    // into the newly selected transcript.
     this.config.activeSessionPath = sessionPath;
+    const cached = this.backgroundSessions.get(sessionPath);
+    if (cached) {
+      if (!this.streaming) void this.env.cleanup();
+      this.backgroundSessions.delete(sessionPath);
+      this.session = cached.session;
+      this.sessionSettings = cached.settings;
+      this.env = cached.env;
+      this.harness = cached.harness;
+      this.streaming = cached.streaming;
+      this.config.activeSessionPath = sessionPath;
+    } else {
+      this.session = await this.sessions.open(sessionPath);
+      this.sessionSettings = await this.sessions.readSettings(this.session, {
+        workspace: this.config.behavior.projectsRoot,
+        approvalMode: this.config.behavior.defaultApprovalMode,
+      });
+      this.useWorkspace(this.sessionSettings.workspace, Boolean(currentPath && this.streaming));
+      this.config.activeSessionPath = sessionPath;
+      this.harness = this.createHarness(this.session, sessionPath);
+      this.streaming = false;
+    }
+
+    const pendingRun = this.afterRunPromises.get(sessionPath);
+    if (pendingRun && !this.streaming) await pendingRun;
     await this.loadTranscript(this.session);
     await this.refreshStats();
-    this.harness = this.createHarness(this.session);
     await this.refreshContextUsage();
   }
 
@@ -499,9 +824,30 @@ export class AgentService {
   }
 
   async deleteSession(sessionPath: string): Promise<void> {
+    const isActive = sessionPath === this.config.activeSessionPath;
+    if (isActive) {
+      await this.abort();
+    } else {
+      const background = this.backgroundSessions.get(sessionPath);
+      if (background) {
+        for (const pending of this.pendingApprovals.values()) {
+          if (pending.sessionPath === sessionPath) pending.resolve(false);
+        }
+        await background.harness.abort();
+        const pendingRun = this.afterRunPromises.get(sessionPath);
+        if (pendingRun) await pendingRun.catch(() => undefined);
+        await background.env.cleanup();
+        this.backgroundSessions.delete(sessionPath);
+      }
+    }
+    this.turnCheckpoints.delete(sessionPath);
+    this.latestCheckpoints.delete(sessionPath);
     await this.sessions.delete(sessionPath);
-    if (sessionPath !== this.config.activeSessionPath) return;
+    if (!isActive) return;
     const remaining = this.sessions.list();
+    // Clear the active path first so openSession does not treat the target as
+    // already selected after the deleted chat's path is removed.
+    this.config.activeSessionPath = null;
     if (remaining[0]) await this.openSession(remaining[0].path);
     else await this.clearSession();
   }
@@ -536,7 +882,8 @@ export class AgentService {
     if (!model) throw new Error(`Unknown model ${key}`);
     this.setActiveKey(key);
     if (!this.harness) {
-      if (this.session) this.harness = this.createHarness(this.session);
+      const sessionPath = this.config.activeSessionPath;
+      if (this.session && sessionPath) this.harness = this.createHarness(this.session, sessionPath);
       return;
     }
     await this.harness.setModel(model);
@@ -592,9 +939,13 @@ export class AgentService {
       activeSessionPath: this.config.activeSessionPath,
       messages: this.messages,
       compactions: this.compactions,
+      pendingApprovals: [...this.pendingApprovals.values()]
+        .filter((pending) => pending.sessionPath === this.config.activeSessionPath)
+        .map((pending) => pending.request),
       isStreaming: this.streaming,
       isCompacting: this.compacting,
       contextUsage: this.contextUsage,
+      turnChanges: this.turnChanges,
       stats: this.stats,
       appVersion: this.appVersion,
     };
