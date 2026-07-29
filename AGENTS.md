@@ -18,3 +18,14 @@ npm run version:major
 These commands update both `package.json` and `package-lock.json`. Include both updated files in the commit being pushed.
 
 Do not push without performing one appropriate version bump. Do not run more than one version command for the same push. If a push fails and you retry the same commit without making additional changes, do not bump the version again.
+
+## Releases
+
+The release workflow (`.github/workflows/release.yml`) triggers only on version tags (`v*.*.*`), not on branch pushes. After pushing the version-bump commit, create and push a matching tag to start a release:
+
+```bash
+git tag v1.0.1   # must match package.json version
+git push origin v1.0.1
+```
+
+The workflow verifies the tag matches `package.json` and fails otherwise.
