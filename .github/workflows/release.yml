@@ -2,7 +2,10 @@ name: Build & Release
 
 on:
   push:
-    branches: [main]
+    # A release is created only from a standard semantic-version tag. The tag
+    # must match package.json, e.g. package 1.0.0 is released as v1.0.0.
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -27,6 +30,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [ "v${PACKAGE_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package.json version v${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
 
       - name: Install dependencies
         run: npm ci
@@ -58,7 +70,6 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/download-artifact@v4
@@ -66,15 +77,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate release tag
-        id: tag
-        run: echo "tag=v$(date +'%Y.%m.%d')-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           files: artifacts/*
           draft: false
           prerelease: false

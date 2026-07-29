@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Desktop coding agent built on the pi agent framework (@earendil-works/pi-agent-core) and Electron",
   "type": "module",
   "main": "dist/main/index.js",
@@ -10,6 +10,9 @@
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --dev",
     "icon": "electron scripts/make-icon.mjs",
+    "version:patch": "npm version patch --no-git-tag-version",
+    "version:minor": "npm version minor --no-git-tag-version",
+    "version:major": "npm version major --no-git-tag-version",
     "dist": "npm run build && electron-builder"
   },
   "author": "LoganZ2 <logan-z2@outlook.com>",
