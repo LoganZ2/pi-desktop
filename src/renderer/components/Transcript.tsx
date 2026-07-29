@@ -4,6 +4,7 @@ import type {
   ChatBlock,
   ChatMessage,
   CompactionNotice,
+  RetryStatus,
   TurnChangesNotice,
 } from "../../shared/ipc.js";
 import {
@@ -90,9 +91,11 @@ function CompactionMarker({ notice }: { notice: CompactionNotice }) {
 function StatusDivider({
   status,
   errorMessage,
+  retry,
 }: {
-  status: "generating" | "complete" | "aborted" | "error";
+  status: "generating" | "complete" | "aborted" | "error" | "retrying";
   errorMessage?: string;
+  retry?: RetryStatus | null;
 }) {
   const [showError, setShowError] = useState(false);
 
@@ -101,9 +104,17 @@ function StatusDivider({
     complete: { dot: "✓", label: "Answer complete", tone: "text-jade-400/60" },
     aborted: { dot: "■", label: "Stopped", tone: "text-mist-500" },
     error: { dot: "!", label: "Generation failed", tone: "text-rose-soft/70" },
+    retrying: {
+      dot: "↻",
+      label: retry
+        ? `Request failed — retrying (${retry.attempt} of ${retry.maxAttempts})`
+        : "Request failed — retrying",
+      tone: "text-amber-soft",
+    },
   };
   const { dot, label, tone } = config[status];
-  const isGenerating = status === "generating";
+  const isGenerating = status === "generating" || status === "retrying";
+  const showDetails = status === "error" || status === "retrying";
 
   return (
     <div className="mt-2">
@@ -120,7 +131,7 @@ function StatusDivider({
         </span>
         <span className="h-px flex-1 bg-ink-800" />
       </div>
-      {status === "error" && (
+      {showDetails && (
         <div className="mt-2 text-center">
           {showError ? (
             <p className="text-[12px] text-rose-soft">{errorMessage || "An unknown error occurred"}</p>
@@ -440,6 +451,7 @@ interface TranscriptProps {
   turnChanges: TurnChangesNotice[];
   streaming: ChatMessage | null;
   isStreaming: boolean;
+  retry: RetryStatus | null;
   toolRuns: Record<string, ToolRun>;
   approvals: Record<string, ApprovalRequest>;
   autoExpandThinking: boolean;
@@ -455,6 +467,7 @@ export function Transcript({
   turnChanges,
   streaming,
   isStreaming,
+  retry,
   toolRuns,
   approvals,
   autoExpandThinking,
@@ -524,9 +537,14 @@ export function Transcript({
 
   // Detect last assistant message to determine status
   const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
-  let status: "generating" | "complete" | "aborted" | "error" = "complete";
+  let status: "generating" | "complete" | "aborted" | "error" | "retrying" = "complete";
   let statusError: string | undefined;
-  if (isStreaming) {
+  if (retry) {
+    // Covers both the wait and the attempt that follows it, so the count stays
+    // on screen instead of flashing back to "Generating…" between the two.
+    status = "retrying";
+    statusError = retry.errorMessage;
+  } else if (isStreaming) {
     status = "generating";
   } else if (lastAssistant) {
     if (lastAssistant.stopReason === "aborted") status = "aborted";
@@ -646,7 +664,7 @@ export function Transcript({
     items.push({
       key: "status-divider",
       kind: "status",
-      node: <StatusDivider status={status} errorMessage={statusError} />,
+      node: <StatusDivider status={status} errorMessage={statusError} retry={retry} />,
     });
   }
 

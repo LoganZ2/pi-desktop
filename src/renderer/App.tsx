@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEvent,
   AppState,
@@ -39,14 +39,38 @@ export function App() {
   const [editingModelKey, setEditingModelKey] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ text: string; id: number } | null>(null);
 
-  const applyState = useCallback((next: AppState) => {
-    setState(next);
-    setMessages(next.messages);
-    setIsStreaming(next.isStreaming);
-    setApprovals(
-      Object.fromEntries(next.pendingApprovals.map((request) => [request.toolCallId, request])),
-    );
+  /**
+   * Chat that the live state below (streaming message, tool runs, approvals)
+   * belongs to. Events are tagged with the chat that produced them, and a chat
+   * the user leaves keeps streaming, so anything tagged otherwise is dropped.
+   * Null while a chat switch is in flight: until the main process reports which
+   * chat is open, there is no transcript an event could safely be placed in.
+   */
+  const liveSession = useRef<string | null>(null);
+
+  const resetTransient = useCallback((sessionPath: string | null) => {
+    liveSession.current = sessionPath;
+    setToolRuns({});
+    setApprovals({});
+    setStreaming(null);
   }, []);
+
+  const applyState = useCallback(
+    (next: AppState) => {
+      // A chat the user switched away from keeps streaming, and its events can
+      // still arrive after the new transcript does. Clearing here catches the
+      // ones that slipped in before the switch was reflected in the main
+      // process, so no stray tool card lands in the chat now on screen.
+      if (next.activeSessionPath !== liveSession.current) resetTransient(next.activeSessionPath);
+      setState(next);
+      setMessages(next.messages);
+      setIsStreaming(next.isStreaming);
+      setApprovals(
+        Object.fromEntries(next.pendingApprovals.map((request) => [request.toolCallId, request])),
+      );
+    },
+    [resetTransient],
+  );
 
   const refresh = useCallback(async () => {
     applyState(await window.pi.getState());
@@ -56,9 +80,11 @@ export function App() {
     void refresh();
     const offState = window.pi.onState(applyState);
     const offApproval = window.pi.onApprovalRequest((request) => {
+      if (request.sessionPath !== liveSession.current) return;
       setApprovals((prev) => ({ ...prev, [request.toolCallId]: request }));
     });
-    const offEvent = window.pi.onAgentEvent((event: AgentEvent) => {
+    const offEvent = window.pi.onAgentEvent((event: AgentEvent, sessionPath: string) => {
+      if (sessionPath !== liveSession.current) return;
       switch (event.type) {
         case "agent_start":
           setIsStreaming(true);
@@ -129,12 +155,6 @@ export function App() {
     [state],
   );
 
-  const resetTransient = () => {
-    setToolRuns({});
-    setApprovals({});
-    setStreaming(null);
-  };
-
   const send = async (text: string) => {
     setDraft(null);
     try {
@@ -191,14 +211,17 @@ export function App() {
   };
 
   const createChat = (input: NewChatInput) => {
-    resetTransient();
+    resetTransient(null);
     void window.pi
       .newSession(input)
       .then((next) => {
         applyState(next);
         setNewChatOpen(false);
       })
-      .catch((error) => console.error("could not create chat:", error));
+      .catch((error) => {
+        console.error("could not create chat:", error);
+        void refresh();
+      });
   };
 
   if (!state) {
@@ -218,13 +241,28 @@ export function App() {
         activePath={state.activeSessionPath}
         onNew={() => setNewChatOpen(true)}
         onOpen={(path) => {
-          resetTransient();
-          void window.pi.openSession(path).then(applyState);
+          // Park the live state before the round trip, so events still in
+          // flight from the chat being left are ignored right away. If the
+          // switch fails, refreshing puts it back on whatever is really open.
+          resetTransient(null);
+          void window.pi
+            .openSession(path)
+            .then(applyState)
+            .catch((error) => {
+              console.error("could not open chat:", error);
+              void refresh();
+            });
         }}
         onRename={(path, title) => void window.pi.renameSession(path, title).then(applyState)}
         onDelete={(path) => {
-          resetTransient();
-          void window.pi.deleteSession(path).then(applyState);
+          resetTransient(null);
+          void window.pi
+            .deleteSession(path)
+            .then(applyState)
+            .catch((error) => {
+              console.error("could not delete chat:", error);
+              void refresh();
+            });
         }}
         onOpenSettings={() => {
           setSettingsSection("general");
@@ -259,6 +297,7 @@ export function App() {
             turnChanges={state.turnChanges}
             streaming={streaming}
             isStreaming={isStreaming}
+            retry={state.retry}
             toolRuns={toolRuns}
             approvals={approvals}
             autoExpandThinking={state.behavior.autoExpandThinking}

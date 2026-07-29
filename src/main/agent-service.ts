@@ -19,7 +19,11 @@ import {
   type SessionTreeEntry,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import {
+  clampThinkingLevel,
+  isRetryableAssistantError,
+  type AssistantMessage,
+} from "@earendil-works/pi-ai";
 import type {
   AppState,
   ApprovalMode,
@@ -34,6 +38,7 @@ import type {
   NewChatInput,
   ProjectNameCheck,
   ProviderOption,
+  RetryStatus,
   SessionSettings,
   ThinkingLevel,
   TurnChangesNotice,
@@ -66,6 +71,12 @@ function describeFetch(input: unknown): string {
 
 const TURN_CHANGES_ENTRY = "pi-desktop:turn-changes";
 const FILE_UNDO_MESSAGE = "pi-desktop:file-undo";
+
+/** Transient model failures are re-sent this many times before giving up. */
+const MAX_TURN_RETRIES = 5;
+/** First backoff step. Every further retry doubles it, up to the cap. */
+const RETRY_BASE_DELAY_MS = 1000;
+const RETRY_MAX_DELAY_MS = 15000;
 
 interface StoredTurnChanges {
   turnId: string;
@@ -106,6 +117,16 @@ export class AgentService {
   private readonly turnCheckpoints = new Map<string, TurnCheckpoint>();
   private readonly backgroundSessions = new Map<string, BackgroundSession>();
   private readonly latestCheckpoints = new Map<string, LatestTurnCheckpoint>();
+  /** Retry in progress per chat, from the failure until the turn settles. */
+  private readonly retries = new Map<string, RetryStatus>();
+  /** Cancels the backoff wait when the user stops or sends something new. */
+  private readonly retryWaits = new Map<string, AbortController>();
+  /**
+   * Chats whose current turn can no longer be re-sent as-is: a tool has already
+   * run, or the user steered mid-turn. Retrying those would repeat side effects
+   * or drop the steer, so a failure there is final.
+   */
+  private readonly unrepeatableTurns = new Set<string>();
   private stats = { tokens: 0, cost: 0 };
   private contextUsage: ContextUsage = {
     tokens: 0,
@@ -123,7 +144,7 @@ export class AgentService {
   /** AGENTS.md chain for the current workspace, loaded once when the chat opens. */
   private agentsInstructions: string | null = null;
 
-  onEvent?: (event: AgentHarnessEvent) => void;
+  onEvent?: (event: AgentHarnessEvent, sessionPath: string) => void;
   onApprovalRequest?: (request: ApprovalRequest) => void;
   onStateChange?: () => void;
 
@@ -241,6 +262,14 @@ export class AgentService {
       tools: this.buildTools(),
       toolContext: () => ({ env: harnessEnv }),
       systemPrompt: () => this.systemPrompt(),
+      // pi applies this to the model calls it makes on its own — compaction and
+      // branch summaries. Turns are retried by runTurn instead, since only the
+      // app knows whether re-sending one would repeat work the tools already did.
+      retry: {
+        enabled: true,
+        maxRetries: MAX_TURN_RETRIES,
+        baseDelayMs: RETRY_BASE_DELAY_MS,
+      },
     });
 
     harness.subscribe((event) => {
@@ -316,6 +345,11 @@ export class AgentService {
         }
         break;
       }
+      case "tool_execution_start":
+        // Tracked for every chat, background ones included: a turn that reached
+        // a tool has changed something outside the transcript.
+        this.unrepeatableTurns.add(sessionPath);
+        break;
       case "session_compact":
         if (isActive) {
           this.compactions = [
@@ -333,7 +367,7 @@ export class AgentService {
       default:
         break;
     }
-    if (isActive) this.onEvent?.(event);
+    if (isActive) this.onEvent?.(event, sessionPath);
   }
 
   private async afterRun(
@@ -534,7 +568,12 @@ export class AgentService {
       this.onStateChange?.();
     }
 
+    // A new message supersedes a retry that has not fired yet. One already in
+    // flight is a running turn, so it takes the steering path below instead.
+    this.cancelRetry(sessionPath);
+
     if (this.streaming) {
+      this.unrepeatableTurns.add(sessionPath);
       await this.harness.steer(text);
       return { steered: true };
     }
@@ -567,12 +606,159 @@ export class AgentService {
     );
     this.onStateChange?.();
 
-    void this.harness.prompt(text).catch((error) => {
-      console.error("prompt failed:", error);
-      this.streaming = false;
-      this.onStateChange?.();
-    });
+    // Captured, because the chat can be switched away from while it runs.
+    const harness = this.harness;
+    const session = this.session;
+    const env = this.env;
+    void this.runTurn({ harness, session, sessionPath, text, workspace, env });
     return { steered: false };
+  }
+
+  /**
+   * Run a turn, sending it again when the model request fails for a transient
+   * reason — a dropped connection, a rate limit, a provider hiccup — rather than
+   * leaving the chat on "Generation failed" after a single attempt.
+   *
+   * Only a turn that produced nothing is retried. Once a tool has run, the
+   * failure stands: re-sending would run that tool a second time, which is not
+   * this code's call to make.
+   */
+  private async runTurn(turn: {
+    harness: AgentHarness<ExecutionToolContext>;
+    session: Session<JsonlSessionMetadata> | null;
+    sessionPath: string;
+    text: string;
+    workspace: string;
+    env: NodeExecutionEnv;
+  }): Promise<void> {
+    const { harness, session, sessionPath, text, workspace, env } = turn;
+    try {
+      for (let retry = 0; ; retry++) {
+        this.unrepeatableTurns.delete(sessionPath);
+
+        let result: AssistantMessage;
+        try {
+          result = await harness.prompt(text);
+        } catch (error) {
+          console.error("prompt failed:", error);
+          this.setBusy(sessionPath, false);
+          this.onStateChange?.();
+          return;
+        }
+
+        // "aborted" is the user stopping; a deterministic error (bad key, oversized
+        // context) fails the same way however often it is sent.
+        if (
+          result.stopReason !== "error" ||
+          retry >= MAX_TURN_RETRIES ||
+          !isRetryableAssistantError(result) ||
+          this.unrepeatableTurns.has(sessionPath) ||
+          !session
+        ) {
+          return;
+        }
+
+        const delayMs = Math.min(RETRY_BASE_DELAY_MS * 2 ** retry, RETRY_MAX_DELAY_MS);
+        this.retries.set(sessionPath, {
+          attempt: retry + 1,
+          maxAttempts: MAX_TURN_RETRIES,
+          delayMs,
+          errorMessage: result.errorMessage ?? "The request failed",
+        });
+        // The failed turn ended, so nothing is streaming. The chat stays marked
+        // busy anyway: it is still working on that message, and the composer
+        // should not invite another one into the gap.
+        this.setBusy(sessionPath, true);
+        this.onStateChange?.();
+
+        if (!(await this.waitToRetry(sessionPath, delayMs))) return;
+        if (!(await this.rewindFailedTurn(harness, session, sessionPath))) return;
+        // The failed attempt is off the branch now. Reload before it streams
+        // again, or the transcript would show the old copy of the message
+        // alongside the one the retry is about to append.
+        if (this.config.activeSessionPath === sessionPath) {
+          await this.loadTranscript(session);
+          this.onStateChange?.();
+        }
+        this.turnCheckpoints.set(sessionPath, await TurnCheckpoint.begin(workspace, { env }));
+      }
+    } finally {
+      if (this.retries.delete(sessionPath)) {
+        this.setBusy(sessionPath, false);
+        this.onStateChange?.();
+      }
+    }
+  }
+
+  /** Mark a chat busy, wherever it currently lives. */
+  private setBusy(sessionPath: string, busy: boolean): void {
+    if (this.config.activeSessionPath === sessionPath) this.streaming = busy;
+    else {
+      const background = this.backgroundSessions.get(sessionPath);
+      if (background) background.streaming = busy;
+    }
+  }
+
+  /** Back off before the next attempt. False means the retry was cancelled. */
+  private waitToRetry(sessionPath: string, delayMs: number): Promise<boolean> {
+    const wait = new AbortController();
+    this.retryWaits.set(sessionPath, wait);
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      timer = setTimeout(() => {
+        wait.signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, delayMs);
+      wait.signal.addEventListener("abort", onAbort, { once: true });
+    }).finally(() => {
+      if (this.retryWaits.get(sessionPath) === wait) this.retryWaits.delete(sessionPath);
+    });
+  }
+
+  /**
+   * Move the leaf off the failed attempt, so the retry re-sends the message as a
+   * new branch instead of appending a second copy of it below the failure. The
+   * failed attempt stays in the tree, reachable through the branch arrows.
+   */
+  private async rewindFailedTurn(
+    harness: AgentHarness<ExecutionToolContext>,
+    session: Session<JsonlSessionMetadata>,
+    sessionPath: string,
+  ): Promise<boolean> {
+    const pendingRun = this.afterRunPromises.get(sessionPath);
+    if (pendingRun) await pendingRun.catch(() => undefined);
+    try {
+      const branch = await session.getBranch();
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const entry = branch[i];
+        if (entry.type === "message" && (entry.message as ChatMessage).role === "user") {
+          // Targeting a user entry moves the leaf to its parent, so the retry
+          // becomes a sibling of the failed attempt rather than a child.
+          await harness.navigateTree(entry.id);
+          return true;
+        }
+      }
+    } catch (error) {
+      console.warn("Could not rewind the failed turn to retry it:", error);
+    }
+    return false;
+  }
+
+  /** Drop a scheduled retry: the user stopped the turn, or moved on. */
+  private cancelRetry(sessionPath: string): void {
+    const wait = this.retryWaits.get(sessionPath);
+    // Without a pending wait an attempt is in flight, and aborting the turn is
+    // the harness's job — clearing the flags here would only lie about it.
+    if (!wait) return;
+    this.retryWaits.delete(sessionPath);
+    this.retries.delete(sessionPath);
+    this.setBusy(sessionPath, false);
+    wait.abort();
+    this.onStateChange?.();
   }
 
   async editMessage(entryId: string, text: string): Promise<void> {
@@ -640,6 +826,7 @@ export class AgentService {
 
   async abort(): Promise<void> {
     const sessionPath = this.config.activeSessionPath;
+    if (sessionPath) this.cancelRetry(sessionPath);
     for (const pending of this.pendingApprovals.values()) {
       if (pending.sessionPath === sessionPath) pending.resolve(false);
     }
@@ -806,16 +993,23 @@ export class AgentService {
   }
 
   async openSession(sessionPath: string): Promise<void> {
-    if (sessionPath === this.config.activeSessionPath) return;
+    // Already open, so re-selecting it in the sidebar is a no-op. The loaded
+    // session is part of that test: on launch the path is restored from the
+    // config before anything is read from disk, and skipping the work there
+    // would leave the chat highlighted but never opened.
+    if (sessionPath === this.config.activeSessionPath && this.session) return;
     if (this.compactionPromise) await this.compactionPromise;
 
     const currentPath = this.config.activeSessionPath;
+    // The chat being left keeps running in the background; `this.streaming` is
+    // about to describe the incoming chat instead, so remember it first.
+    const wasStreaming = this.streaming;
     if (
       currentPath &&
       this.session &&
       this.harness &&
       this.sessionSettings &&
-      this.streaming
+      wasStreaming
     ) {
       this.backgroundSessions.set(currentPath, {
         session: this.session,
@@ -828,28 +1022,33 @@ export class AgentService {
 
     // Mark the old harness inactive before opening the target session so any
     // background events emitted during the filesystem reads are not forwarded
-    // into the newly selected transcript.
+    // into the newly selected transcript. The old transcript goes with it: a
+    // state push landing mid-switch would otherwise show the previous chat's
+    // messages under the newly selected one.
     this.config.activeSessionPath = sessionPath;
+    this.messages = [];
+    this.compactions = [];
+    this.turnChanges = [];
+    this.stats = { tokens: 0, cost: 0 };
+    this.streaming = false;
+
     const cached = this.backgroundSessions.get(sessionPath);
     if (cached) {
-      if (!this.streaming) void this.env.cleanup();
+      if (!wasStreaming) void this.env.cleanup();
       this.backgroundSessions.delete(sessionPath);
       this.session = cached.session;
       this.sessionSettings = cached.settings;
       this.env = cached.env;
       this.harness = cached.harness;
       this.streaming = cached.streaming;
-      this.config.activeSessionPath = sessionPath;
     } else {
       this.session = await this.sessions.open(sessionPath);
       this.sessionSettings = await this.sessions.readSettings(this.session, {
         workspace: this.config.behavior.projectsRoot,
         approvalMode: this.config.behavior.defaultApprovalMode,
       });
-      this.useWorkspace(this.sessionSettings.workspace, Boolean(currentPath && this.streaming));
-      this.config.activeSessionPath = sessionPath;
+      this.useWorkspace(this.sessionSettings.workspace, Boolean(currentPath && wasStreaming));
       this.harness = this.createHarness(this.session, sessionPath);
-      this.streaming = false;
     }
 
     const pendingRun = this.afterRunPromises.get(sessionPath);
@@ -880,6 +1079,7 @@ export class AgentService {
     } else {
       const background = this.backgroundSessions.get(sessionPath);
       if (background) {
+        this.cancelRetry(sessionPath);
         for (const pending of this.pendingApprovals.values()) {
           if (pending.sessionPath === sessionPath) pending.resolve(false);
         }
@@ -892,6 +1092,8 @@ export class AgentService {
     }
     this.turnCheckpoints.delete(sessionPath);
     this.latestCheckpoints.delete(sessionPath);
+    this.retries.delete(sessionPath);
+    this.unrepeatableTurns.delete(sessionPath);
     await this.sessions.delete(sessionPath);
     this.ponytailSessionOff.delete(sessionPath);
     if (!isActive) return;
@@ -995,6 +1197,9 @@ export class AgentService {
         .map((pending) => pending.request),
       isStreaming: this.streaming,
       isCompacting: this.compacting,
+      retry: this.config.activeSessionPath
+        ? this.retries.get(this.config.activeSessionPath) ?? null
+        : null,
       contextUsage: this.contextUsage,
       turnChanges: this.turnChanges,
       stats: this.stats,

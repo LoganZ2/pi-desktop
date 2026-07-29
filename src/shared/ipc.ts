@@ -11,6 +11,18 @@ import type {
 export type AgentEvent = CoreAgentEvent | SessionCompactEvent;
 export type { ThinkingLevel };
 
+/**
+ * A harness event tagged with the chat that produced it.
+ *
+ * A chat keeps streaming after the user switches away, and its events can still
+ * be in flight over IPC when the new chat's transcript arrives. The renderer
+ * drops anything that is not tagged with the chat currently on screen.
+ */
+export interface AgentEventEnvelope {
+  event: AgentEvent;
+  sessionPath: string;
+}
+
 /** How shell commands are gated before they run. */
 export type ApprovalMode = "ask" | "auto";
 
@@ -183,6 +195,17 @@ export interface CompactionNotice {
   tokensBefore: number;
 }
 
+/** A turn that failed for a transient reason and is being sent again. */
+export interface RetryStatus {
+  /** Which retry this is, counting from 1. */
+  attempt: number;
+  maxAttempts: number;
+  /** Wait before this attempt starts. */
+  delayMs: number;
+  /** The failure that triggered the retry. */
+  errorMessage: string;
+}
+
 export interface ContextUsage {
   /** Estimated tokens that will be sent on the next model request. */
   tokens: number;
@@ -208,6 +231,8 @@ export interface AppState {
   pendingApprovals: ApprovalRequest[];
   isStreaming: boolean;
   isCompacting: boolean;
+  /** Set while the open chat's turn is being retried after a transient failure. */
+  retry: RetryStatus | null;
   contextUsage: ContextUsage;
   stats: { tokens: number; cost: number };
   appVersion: string;
@@ -293,7 +318,7 @@ export interface PiBridge {
   respondApproval(approvalId: string, allow: boolean, always: boolean): Promise<void>;
 
   // subscriptions
-  onAgentEvent(listener: (event: AgentEvent) => void): () => void;
+  onAgentEvent(listener: (event: AgentEvent, sessionPath: string) => void): () => void;
   onApprovalRequest(listener: (request: ApprovalRequest) => void): () => void;
   onState(listener: (state: AppState) => void): () => void;
 }

@@ -2,6 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BrowserWindow, app, dialog, ipcMain, shell } from "electron";
 import type {
+  AgentEvent,
+  AgentEventEnvelope,
   ApprovalMode,
   BehaviorSettings,
   CustomModelEdit,
@@ -71,7 +73,12 @@ app.whenReady().then(async () => {
   credentials = new EncryptedCredentialStore();
   service = new AgentService(config, new ModelStore(), credentials, app.getVersion());
 
-  service.onEvent = (event) => win?.webContents.send(CH_AGENT_EVENT, event);
+  service.onEvent = (event, sessionPath) => {
+    // The harness emits more event types than the renderer's clone-safe view
+    // declares; the extras fall through its switch untouched.
+    const envelope: AgentEventEnvelope = { event: event as AgentEvent, sessionPath };
+    win?.webContents.send(CH_AGENT_EVENT, envelope);
+  };
   service.onApprovalRequest = (request) => win?.webContents.send(CH_APPROVAL_REQUEST, request);
   service.onStateChange = () => {
     void service.getState().then((state) => win?.webContents.send(CH_STATE, state));

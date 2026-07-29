@@ -3,6 +3,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AgentEvent,
+  AgentEventEnvelope,
   AppState,
   ApprovalRequest,
   BehaviorSettings,
@@ -65,8 +66,10 @@ const bridge: PiBridge = {
   respondApproval: (approvalId: string, allow: boolean, always: boolean) =>
     ipcRenderer.invoke("pi:approval-respond", approvalId, allow, always),
 
-  onAgentEvent: (listener: (event: AgentEvent) => void) =>
-    subscribe<AgentEvent>(CH_AGENT_EVENT, listener),
+  onAgentEvent: (listener: (event: AgentEvent, sessionPath: string) => void) =>
+    subscribe<AgentEventEnvelope>(CH_AGENT_EVENT, ({ event, sessionPath }) =>
+      listener(event, sessionPath),
+    ),
   onApprovalRequest: (listener: (request: ApprovalRequest) => void) =>
     subscribe<ApprovalRequest>(CH_APPROVAL_REQUEST, listener),
   onState: (listener: (state: AppState) => void) => subscribe<AppState>(CH_STATE, listener),
