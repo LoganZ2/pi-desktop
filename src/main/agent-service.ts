@@ -38,6 +38,9 @@ import type {
   NewChatInput,
   ProjectNameCheck,
   ProviderOption,
+  QuestionAnswer,
+  QuestionItem,
+  QuestionRequest,
   RetryStatus,
   SessionSettings,
   ThinkingLevel,
@@ -55,6 +58,7 @@ import {
   isPonytailDeactivationCommand,
   normalizePonytailMode,
 } from "./ponytail.js";
+import { createAskQuestionTool } from "./ask-question.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { SessionManager, titleFromPrompt } from "./session-manager.js";
 import { TurnCheckpoint, type FinishedTurnCheckpoint } from "./turn-checkpoint.js";
@@ -110,6 +114,10 @@ export class AgentService {
     string,
     { resolve: (allow: boolean) => void; request: ApprovalRequest; sessionPath: string }
   >();
+  private pendingQuestions = new Map<
+    string,
+    { resolve: (answers: QuestionAnswer[]) => void; request: QuestionRequest; sessionPath: string }
+  >();
   private streaming = false;
   private compacting = false;
   private compactionPromise: Promise<void> | null = null;
@@ -146,6 +154,7 @@ export class AgentService {
 
   onEvent?: (event: AgentHarnessEvent, sessionPath: string) => void;
   onApprovalRequest?: (request: ApprovalRequest) => void;
+  onQuestionRequest?: (request: QuestionRequest) => void;
   onStateChange?: () => void;
 
   constructor(
@@ -222,6 +231,7 @@ export class AgentService {
       "- To fetch a URL, use the web_fetch tool rather than curl or wget in bash.",
       "- Relative paths resolve against the working directory.",
       "- Keep answers concise. Use markdown code blocks for code.",
+      "- When a decision is genuinely the user's — one you cannot settle from the request, the code, or a sensible default — put it to them with the ask_question tool instead of guessing. Make routine calls yourself.",
       "- Never run destructive commands unless the user explicitly asks.",
     ];
     if (this.agentsInstructions) {
@@ -236,13 +246,16 @@ export class AgentService {
     return parts.join("\n");
   }
 
-  private buildTools(): Tools {
+  private buildTools(sessionPath: string): Tools {
     return [
       createReadTool(),
       createBashTool(),
       createEditTool(),
       createWriteTool(),
       createWebFetchTool(),
+      createAskQuestionTool((toolCallId, questions, signal) =>
+        this.requestQuestion(toolCallId, questions, sessionPath, signal),
+      ),
     ] as unknown as Tools;
   }
 
@@ -259,7 +272,7 @@ export class AgentService {
       models: this.registry.models,
       model,
       thinkingLevel: clampThinkingLevel(model, this.config.behavior.thinkingLevel),
-      tools: this.buildTools(),
+      tools: this.buildTools(sessionPath),
       toolContext: () => ({ env: harnessEnv }),
       systemPrompt: () => this.systemPrompt(),
       // pi applies this to the model calls it makes on its own — compaction and
@@ -556,6 +569,47 @@ export class AgentService {
     this.pendingApprovals.get(approvalId)?.resolve(allow);
   }
 
+  // ---------- questions ----------
+
+  /**
+   * Put an ask_question call to the user and wait. Aborting the turn resolves it
+   * as unanswered, so a stopped turn never leaves the tool hanging.
+   */
+  private requestQuestion(
+    toolCallId: string,
+    questions: QuestionItem[],
+    sessionPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<QuestionAnswer[]> {
+    const questionId = randomUUID();
+    const request: QuestionRequest = { questionId, toolCallId, questions, sessionPath };
+    return new Promise<QuestionAnswer[]>((resolve) => {
+      if (signal?.aborted) {
+        resolve([]);
+        return;
+      }
+      const onAbort = () => this.pendingQuestions.get(questionId)?.resolve([]);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.pendingQuestions.set(questionId, {
+        resolve: (answers) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(answers);
+        },
+        request,
+        sessionPath,
+      });
+      if (this.config.activeSessionPath === sessionPath) this.onQuestionRequest?.(request);
+    }).finally(() => {
+      this.pendingQuestions.delete(questionId);
+      this.onStateChange?.();
+    });
+  }
+
+  /** Answer a pending question. An empty list means the user dismissed it. */
+  respondQuestion(questionId: string, answers: QuestionAnswer[]): void {
+    this.pendingQuestions.get(questionId)?.resolve(answers);
+  }
+
   // ---------- chat ----------
 
   async prompt(text: string): Promise<{ steered: boolean }> {
@@ -827,8 +881,13 @@ export class AgentService {
   async abort(): Promise<void> {
     const sessionPath = this.config.activeSessionPath;
     if (sessionPath) this.cancelRetry(sessionPath);
+    // Released before the harness is asked to stop: aborting waits for the tool
+    // to return, and a tool blocked on the user would never get there.
     for (const pending of this.pendingApprovals.values()) {
       if (pending.sessionPath === sessionPath) pending.resolve(false);
+    }
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.sessionPath === sessionPath) pending.resolve([]);
     }
     if (this.compactionPromise) {
       await this.compactionPromise.catch(() => undefined);
@@ -1083,6 +1142,9 @@ export class AgentService {
         for (const pending of this.pendingApprovals.values()) {
           if (pending.sessionPath === sessionPath) pending.resolve(false);
         }
+        for (const pending of this.pendingQuestions.values()) {
+          if (pending.sessionPath === sessionPath) pending.resolve([]);
+        }
         await background.harness.abort();
         const pendingRun = this.afterRunPromises.get(sessionPath);
         if (pendingRun) await pendingRun.catch(() => undefined);
@@ -1193,6 +1255,9 @@ export class AgentService {
       messages: this.messages,
       compactions: this.compactions,
       pendingApprovals: [...this.pendingApprovals.values()]
+        .filter((pending) => pending.sessionPath === this.config.activeSessionPath)
+        .map((pending) => pending.request),
+      pendingQuestions: [...this.pendingQuestions.values()]
         .filter((pending) => pending.sessionPath === this.config.activeSessionPath)
         .map((pending) => pending.request),
       isStreaming: this.streaming,

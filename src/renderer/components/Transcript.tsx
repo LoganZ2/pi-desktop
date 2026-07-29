@@ -4,6 +4,8 @@ import type {
   ChatBlock,
   ChatMessage,
   CompactionNotice,
+  QuestionAnswer,
+  QuestionRequest,
   RetryStatus,
   TurnChangesNotice,
 } from "../../shared/ipc.js";
@@ -454,8 +456,10 @@ interface TranscriptProps {
   retry: RetryStatus | null;
   toolRuns: Record<string, ToolRun>;
   approvals: Record<string, ApprovalRequest>;
+  questions: Record<string, QuestionRequest>;
   autoExpandThinking: boolean;
   onApprove: (approvalId: string, allow: boolean, always: boolean) => void;
+  onAnswer: (questionId: string, answers: QuestionAnswer[]) => void;
   onEditMessage: (entryId: string, text: string) => void;
   onSwitchBranch: (targetId: string) => void;
   onUndoChanges: (turnId: string) => void;
@@ -470,8 +474,10 @@ export function Transcript({
   retry,
   toolRuns,
   approvals,
+  questions,
   autoExpandThinking,
   onApprove,
+  onAnswer,
   onEditMessage,
   onSwitchBranch,
   onUndoChanges,
@@ -503,7 +509,7 @@ export function Transcript({
     scrollRaf.current = requestAnimationFrame(() => {
       node.scrollTop = node.scrollHeight;
     });
-  }, [messages, streaming, isStreaming, toolRuns, approvals]);
+  }, [messages, streaming, isStreaming, toolRuns, approvals, questions]);
 
   const results = new Map<string, ChatMessage>();
   for (const message of messages) {
@@ -638,7 +644,9 @@ export function Transcript({
               run={toolRuns[id]}
               result={results.get(id)}
               approval={approvals[id]}
+              question={questions[id]}
               onApprove={onApprove}
+              onAnswer={onAnswer}
             />
           ),
         });

@@ -12,10 +12,13 @@ import type {
   CustomProviderInput,
   NewChatInput,
   PiBridge,
+  QuestionAnswer,
+  QuestionRequest,
 } from "../shared/ipc.js";
 
 const CH_AGENT_EVENT = "pi:agent-event";
 const CH_APPROVAL_REQUEST = "pi:approval-request";
+const CH_QUESTION_REQUEST = "pi:question-request";
 const CH_STATE = "pi:state";
 
 function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
@@ -65,6 +68,8 @@ const bridge: PiBridge = {
 
   respondApproval: (approvalId: string, allow: boolean, always: boolean) =>
     ipcRenderer.invoke("pi:approval-respond", approvalId, allow, always),
+  respondQuestion: (questionId: string, answers: QuestionAnswer[]) =>
+    ipcRenderer.invoke("pi:question-respond", questionId, answers),
 
   onAgentEvent: (listener: (event: AgentEvent, sessionPath: string) => void) =>
     subscribe<AgentEventEnvelope>(CH_AGENT_EVENT, ({ event, sessionPath }) =>
@@ -72,6 +77,8 @@ const bridge: PiBridge = {
     ),
   onApprovalRequest: (listener: (request: ApprovalRequest) => void) =>
     subscribe<ApprovalRequest>(CH_APPROVAL_REQUEST, listener),
+  onQuestionRequest: (listener: (request: QuestionRequest) => void) =>
+    subscribe<QuestionRequest>(CH_QUESTION_REQUEST, listener),
   onState: (listener: (state: AppState) => void) => subscribe<AppState>(CH_STATE, listener),
 };
 

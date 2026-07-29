@@ -1,6 +1,13 @@
 import { useState, type ReactNode } from "react";
-import type { ApprovalRequest, ChatBlock, ChatMessage } from "../../shared/ipc.js";
+import type {
+  ApprovalRequest,
+  ChatBlock,
+  ChatMessage,
+  QuestionAnswer,
+  QuestionRequest,
+} from "../../shared/ipc.js";
 import {
+  IconChat,
   IconCheck,
   IconFile,
   IconGlobe,
@@ -279,6 +286,171 @@ function contentAsAddedRows(content: string): DiffRow[] {
   }));
 }
 
+// ---------- question ----------
+
+/**
+ * The ask_question form. The agent's options are suggestions, so every question
+ * also takes an answer in the user's own words, and the whole thing can be
+ * skipped — the tool tells the agent to carry on with its best judgment.
+ */
+function QuestionForm({
+  request,
+  onAnswer,
+}: {
+  request: QuestionRequest;
+  onAnswer: (questionId: string, answers: QuestionAnswer[]) => void;
+}) {
+  const [picked, setPicked] = useState<Record<number, string[]>>({});
+  const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({});
+  const [otherText, setOtherText] = useState<Record<number, string>>({});
+
+  const answerFor = (index: number): string[] => {
+    const chosen = picked[index] ?? [];
+    const own = (otherText[index] ?? "").trim();
+    return own ? [...chosen, own] : chosen;
+  };
+  const complete = request.questions.every((_question, index) => answerFor(index).length > 0);
+
+  const submit = (override?: { index: number; selected: string[] }) => {
+    onAnswer(
+      request.questionId,
+      request.questions.map((question, index) => ({
+        header: question.header,
+        question: question.question,
+        selected: override?.index === index ? override.selected : answerFor(index),
+      })),
+    );
+  };
+
+  const choose = (index: number, label: string, multiSelect: boolean) => {
+    if (multiSelect) {
+      setPicked((prev) => {
+        const current = prev[index] ?? [];
+        return {
+          ...prev,
+          [index]: current.includes(label)
+            ? current.filter((chosen) => chosen !== label)
+            : [...current, label],
+        };
+      });
+      return;
+    }
+    setPicked((prev) => ({ ...prev, [index]: [label] }));
+    // A single one-choice question is the whole form, so picking answers it.
+    // The override carries the click, since the state above lands later.
+    if (request.questions.length === 1 && !(otherText[0] ?? "").trim()) {
+      submit({ index, selected: [label] });
+    }
+  };
+
+  return (
+    <div className="border-t border-iris-500/30 bg-iris-500/[0.06] px-3 py-3">
+      {request.questions.map((question, index) => (
+        <div key={`${question.header}-${index}`} className={cx(index > 0 && "mt-4")}>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-iris-500/40 px-2 py-0.5 text-[10.5px] font-medium text-iris-400">
+              {question.header}
+            </span>
+            {question.multiSelect && (
+              <span className="text-[10.5px] text-mist-500">pick any that apply</span>
+            )}
+          </div>
+          <p className="mt-1.5 text-[13px] text-mist-200">{question.question}</p>
+
+          <div className="mt-2 flex flex-col gap-1.5">
+            {question.options.map((option) => {
+              const selected = (picked[index] ?? []).includes(option.label);
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  onClick={() => choose(index, option.label, question.multiSelect)}
+                  className={cx(
+                    "rounded-lg border px-2.5 py-1.5 text-left transition",
+                    selected
+                      ? "border-iris-500/60 bg-iris-500/10"
+                      : "border-ink-700 hover:border-iris-500/40 hover:bg-ink-800/60",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 text-[12px] font-medium text-mist-200">
+                    {selected && <IconCheck className="h-3 w-3 shrink-0 text-iris-400" />}
+                    {option.label}
+                  </span>
+                  {option.description && (
+                    <span className="mt-0.5 block text-[11.5px] text-mist-500">
+                      {option.description}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+
+            {otherOpen[index] ? (
+              <input
+                autoFocus
+                value={otherText[index] ?? ""}
+                onChange={(event) =>
+                  setOtherText((prev) => ({ ...prev, [index]: event.target.value }))
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && complete) submit();
+                }}
+                placeholder="Answer in your own words"
+                className="rounded-lg border border-iris-500/40 bg-ink-950 px-2.5 py-1.5 text-[12px] text-mist-200 outline-none placeholder:text-mist-600"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setOtherOpen((prev) => ({ ...prev, [index]: true }))}
+                className="rounded-lg border border-dashed border-ink-700 px-2.5 py-1.5 text-left text-[12px] text-mist-500 transition hover:border-iris-500/40 hover:text-mist-300"
+              >
+                Other…
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!complete}
+          onClick={() => submit()}
+          className={cx(
+            "rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition",
+            complete
+              ? "border-iris-500/60 text-iris-400 hover:bg-iris-500/10"
+              : "border-ink-700 text-mist-600",
+          )}
+        >
+          Send answer
+        </button>
+        <button
+          type="button"
+          onClick={() => onAnswer(request.questionId, [])}
+          className="rounded-lg border border-ink-700 px-2.5 py-1.5 text-[12px] font-medium text-mist-400 transition hover:bg-ink-750"
+        >
+          Skip
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** How an answered question reads once the agent has moved on. */
+function AnswerSummary({ answers }: { answers: QuestionAnswer[] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950 px-3 py-2">
+      {answers.map((answer, index) => (
+        <div key={`${answer.header}-${index}`} className={cx(index > 0 && "mt-2")}>
+          <p className="text-[11.5px] text-mist-500">{answer.question}</p>
+          <p className="mt-0.5 text-[12px] text-mist-200">{answer.selected.join(", ")}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---------- card ----------
 
 const TOOL_ICON: Record<string, typeof IconTerminal> = {
@@ -287,6 +459,7 @@ const TOOL_ICON: Record<string, typeof IconTerminal> = {
   write: IconFile,
   edit: IconPencil,
   web_fetch: IconGlobe,
+  ask_question: IconChat,
 };
 
 interface ToolCardProps {
@@ -294,10 +467,20 @@ interface ToolCardProps {
   run?: ToolRun;
   result?: ChatMessage;
   approval?: ApprovalRequest;
+  question?: QuestionRequest;
   onApprove: (approvalId: string, allow: boolean, always: boolean) => void;
+  onAnswer: (questionId: string, answers: QuestionAnswer[]) => void;
 }
 
-export function ToolCard({ call, run, result, approval, onApprove }: ToolCardProps) {
+export function ToolCard({
+  call,
+  run,
+  result,
+  approval,
+  question,
+  onApprove,
+  onAnswer,
+}: ToolCardProps) {
   const [expanded, setExpanded] = useState(false);
   const name = call.name ?? "tool";
   const args = (call.arguments ?? {}) as Record<string, any>;
@@ -306,8 +489,11 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
   const isError = result?.isError === true || run?.status === "error";
   const finished = Boolean(result) || run?.status === "done" || run?.status === "error";
   const output = result ? contentToText(result.content) : (run?.output ?? "");
-  const details = (result?.details ?? run?.details) as { diff?: string } | undefined;
+  const details = (result?.details ?? run?.details) as
+    | { diff?: string; answers?: QuestionAnswer[] }
+    | undefined;
   const waiting = Boolean(approval);
+  const asking = Boolean(question);
 
   const diffRows =
     name === "edit" && typeof details?.diff === "string"
@@ -324,6 +510,11 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
       const method = String(args.method ?? "GET").toUpperCase();
       return method === "GET" ? String(args.url ?? "") : `${method} ${String(args.url ?? "")}`;
     }
+    if (name === "ask_question") {
+      const questions = Array.isArray(args.questions) ? args.questions : [];
+      const first = String(questions[0]?.question ?? "");
+      return questions.length > 1 ? `${first} (+${questions.length - 1} more)` : first;
+    }
     if (typeof args.path === "string") {
       const range =
         name === "read" && args.offset ? ` :${args.offset}${args.limit ? `-${args.offset + args.limit - 1}` : "+"}` : "";
@@ -332,16 +523,27 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
     return JSON.stringify(args);
   })();
 
-  const status = waiting
-    ? { label: "needs approval", tone: "text-amber-soft border-amber-soft/40" }
-    : isError
-      ? { label: "failed", tone: "text-rose-soft border-rose-soft/40" }
-      : finished
-        ? { label: "done", tone: "text-jade-400 border-jade-400/40" }
-        : { label: "running", tone: "text-amber-soft border-amber-soft/40" };
+  const status = asking
+    ? { label: "your call", tone: "text-iris-400 border-iris-500/40" }
+    : waiting
+      ? { label: "needs approval", tone: "text-amber-soft border-amber-soft/40" }
+      : isError
+        ? { label: "failed", tone: "text-rose-soft border-rose-soft/40" }
+        : finished
+          ? { label: "done", tone: "text-jade-400 border-jade-400/40" }
+          : { label: "running", tone: "text-amber-soft border-amber-soft/40" };
 
   const body: ReactNode = (() => {
     if (diffRows) return <DiffView rows={diffRows} />;
+    if (name === "ask_question") {
+      return details?.answers && details.answers.length > 0 ? (
+        <AnswerSummary answers={details.answers} />
+      ) : (
+        <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950 px-3 py-2 text-[12px] text-mist-500">
+          {output || "Waiting for an answer."}
+        </div>
+      );
+    }
     if (name === "bash") {
       return <BashBody command={String(args.command ?? "")} output={output} isError={isError} />;
     }
@@ -379,13 +581,16 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
     );
   })();
 
-  const showBody = expanded || (run?.status === "running" && Boolean(output)) || waiting;
+  // The question form is the card's body while it is pending, so the raw
+  // arguments underneath would only repeat it.
+  const showBody =
+    !asking && (expanded || (run?.status === "running" && Boolean(output)) || waiting);
 
   return (
     <div
       className={cx(
         "overflow-hidden rounded-xl border bg-ink-850/70 transition",
-        waiting ? "border-amber-soft/40" : "border-ink-800",
+        asking ? "border-iris-500/40" : waiting ? "border-amber-soft/40" : "border-ink-800",
       )}
     >
       <button
@@ -416,6 +621,8 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
       </button>
 
       {showBody && <div className="px-2 pb-2">{body}</div>}
+
+      {question && <QuestionForm request={question} onAnswer={onAnswer} />}
 
       {approval && (
         <div className="border-t border-amber-soft/30 bg-amber-soft/[0.06] px-3 py-2.5">

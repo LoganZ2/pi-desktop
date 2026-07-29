@@ -7,6 +7,8 @@ import type {
   BehaviorSettings,
   ChatMessage,
   NewChatInput,
+  QuestionAnswer,
+  QuestionRequest,
   ThinkingLevel,
 } from "../shared/ipc.js";
 import { AddModelDialog } from "./components/AddModelDialog.js";
@@ -32,6 +34,7 @@ export function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolRuns, setToolRuns] = useState<Record<string, ToolRun>>({});
   const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
+  const [questions, setQuestions] = useState<Record<string, QuestionRequest>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<"general" | "models">("general");
   const [addModelOpen, setAddModelOpen] = useState(false);
@@ -52,6 +55,7 @@ export function App() {
     liveSession.current = sessionPath;
     setToolRuns({});
     setApprovals({});
+    setQuestions({});
     setStreaming(null);
   }, []);
 
@@ -68,6 +72,9 @@ export function App() {
       setApprovals(
         Object.fromEntries(next.pendingApprovals.map((request) => [request.toolCallId, request])),
       );
+      setQuestions(
+        Object.fromEntries(next.pendingQuestions.map((request) => [request.toolCallId, request])),
+      );
     },
     [resetTransient],
   );
@@ -82,6 +89,10 @@ export function App() {
     const offApproval = window.pi.onApprovalRequest((request) => {
       if (request.sessionPath !== liveSession.current) return;
       setApprovals((prev) => ({ ...prev, [request.toolCallId]: request }));
+    });
+    const offQuestion = window.pi.onQuestionRequest((request) => {
+      if (request.sessionPath !== liveSession.current) return;
+      setQuestions((prev) => ({ ...prev, [request.toolCallId]: request }));
     });
     const offEvent = window.pi.onAgentEvent((event: AgentEvent, sessionPath: string) => {
       if (sessionPath !== liveSession.current) return;
@@ -128,6 +139,13 @@ export function App() {
           break;
         }
         case "tool_execution_end": {
+          // The question was answered, skipped, or the turn was stopped; either
+          // way the form is spent and the result takes its place.
+          setQuestions((prev) => {
+            if (!prev[event.toolCallId]) return prev;
+            const { [event.toolCallId]: _answered, ...rest } = prev;
+            return rest;
+          });
           const result = event.result as { content?: unknown; details?: unknown };
           setToolRuns((prev) => ({
             ...prev,
@@ -146,6 +164,7 @@ export function App() {
     return () => {
       offState();
       offApproval();
+      offQuestion();
       offEvent();
     };
   }, [applyState, refresh]);
@@ -204,6 +223,13 @@ export function App() {
     );
     void window.pi.respondApproval(approvalId, allow, always);
     if (always) void refresh();
+  };
+
+  const respondQuestion = (questionId: string, answers: QuestionAnswer[]) => {
+    setQuestions((prev) =>
+      Object.fromEntries(Object.entries(prev).filter(([, v]) => v.questionId !== questionId)),
+    );
+    void window.pi.respondQuestion(questionId, answers);
   };
 
   const updateBehavior = (patch: Partial<BehaviorSettings>) => {
@@ -300,8 +326,10 @@ export function App() {
             retry={state.retry}
             toolRuns={toolRuns}
             approvals={approvals}
+            questions={questions}
             autoExpandThinking={state.behavior.autoExpandThinking}
             onApprove={respondApproval}
+            onAnswer={respondQuestion}
             onEditMessage={editAndResend}
             onSwitchBranch={switchBranch}
             onUndoChanges={undoLatest}

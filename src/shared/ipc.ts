@@ -229,6 +229,7 @@ export interface AppState {
   compactions: CompactionNotice[];
   turnChanges: TurnChangesNotice[];
   pendingApprovals: ApprovalRequest[];
+  pendingQuestions: QuestionRequest[];
   isStreaming: boolean;
   isCompacting: boolean;
   /** Set while the open chat's turn is being retried after a transient failure. */
@@ -245,6 +246,39 @@ export interface ApprovalRequest {
   command: string;
   /** Chat the approval belongs to, so a stale banner never blocks another chat. */
   sessionPath: string;
+}
+
+/** One choice offered by the ask_question tool. */
+export interface QuestionOption {
+  label: string;
+  /** What picking this means — shown under the label. */
+  description: string;
+}
+
+export interface QuestionItem {
+  question: string;
+  /** Short label for the question, shown as a chip. */
+  header: string;
+  /** Whether more than one option can be picked. */
+  multiSelect: boolean;
+  options: QuestionOption[];
+}
+
+/** A blocked ask_question call waiting for the user to answer. */
+export interface QuestionRequest {
+  questionId: string;
+  toolCallId: string;
+  questions: QuestionItem[];
+  /** Chat the question belongs to, so it never surfaces in another one. */
+  sessionPath: string;
+}
+
+/** What the user picked for one question. Free text arrives here too. */
+export interface QuestionAnswer {
+  header: string;
+  question: string;
+  /** Chosen option labels, or the typed text when the user answered "Other". */
+  selected: string[];
 }
 
 export interface CustomProviderInput {
@@ -272,6 +306,7 @@ export interface WebSocketStatusInfo {
 
 export const CH_AGENT_EVENT = "pi:agent-event";
 export const CH_APPROVAL_REQUEST = "pi:approval-request";
+export const CH_QUESTION_REQUEST = "pi:question-request";
 export const CH_STATE = "pi:state";
 
 /** API exposed by the preload bridge as `window.pi`. */
@@ -316,9 +351,12 @@ export interface PiBridge {
 
   // approvals
   respondApproval(approvalId: string, allow: boolean, always: boolean): Promise<void>;
+  /** Answer an ask_question call. Empty answers cancel it. */
+  respondQuestion(questionId: string, answers: QuestionAnswer[]): Promise<void>;
 
   // subscriptions
   onAgentEvent(listener: (event: AgentEvent, sessionPath: string) => void): () => void;
   onApprovalRequest(listener: (request: ApprovalRequest) => void): () => void;
+  onQuestionRequest(listener: (request: QuestionRequest) => void): () => void;
   onState(listener: (state: AppState) => void): () => void;
 }

@@ -9,8 +9,14 @@ import type {
   CustomModelEdit,
   CustomProviderInput,
   NewChatInput,
+  QuestionAnswer,
 } from "../shared/ipc.js";
-import { CH_AGENT_EVENT, CH_APPROVAL_REQUEST, CH_STATE } from "../shared/ipc.js";
+import {
+  CH_AGENT_EVENT,
+  CH_APPROVAL_REQUEST,
+  CH_QUESTION_REQUEST,
+  CH_STATE,
+} from "../shared/ipc.js";
 import { AgentService } from "./agent-service.js";
 import { ConfigStore } from "./config-store.js";
 import { EncryptedCredentialStore } from "./credentials.js";
@@ -80,6 +86,7 @@ app.whenReady().then(async () => {
     win?.webContents.send(CH_AGENT_EVENT, envelope);
   };
   service.onApprovalRequest = (request) => win?.webContents.send(CH_APPROVAL_REQUEST, request);
+  service.onQuestionRequest = (request) => win?.webContents.send(CH_QUESTION_REQUEST, request);
   service.onStateChange = () => {
     void service.getState().then((state) => win?.webContents.send(CH_STATE, state));
   };
@@ -197,6 +204,9 @@ app.whenReady().then(async () => {
       service.respondApproval(approvalId, allow, always);
     },
   );
+  ipcMain.handle("pi:question-respond", (_e, questionId: string, answers: QuestionAnswer[]) => {
+    service.respondQuestion(questionId, answers);
+  });
 
   createWindow();
 
