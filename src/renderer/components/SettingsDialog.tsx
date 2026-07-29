@@ -143,6 +143,22 @@ export function SettingsDialog({
                   onChange={(autoCompact) => onUpdate({ autoCompact })}
                 />
               </SettingRow>
+
+              <SettingRow
+                title="Lazy senior dev mode (ponytail)"
+                description="Pushes the agent toward the smallest solution that actually works: reuse before rewrite, standard library before dependencies, one line before fifty. Safety checks, validation, and anything you explicitly ask for are never cut. Say “stop ponytail” in a chat to turn it off there."
+              >
+                <SegmentedControl
+                  value={behavior.ponytailMode}
+                  onChange={(ponytailMode) => onUpdate({ ponytailMode })}
+                  options={[
+                    { value: "off", label: "Off" },
+                    { value: "lite", label: "Lite" },
+                    { value: "full", label: "Full" },
+                    { value: "ultra", label: "Ultra" },
+                  ]}
+                />
+              </SettingRow>
             </div>
           )}
 

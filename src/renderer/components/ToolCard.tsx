@@ -3,6 +3,7 @@ import type { ApprovalRequest, ChatBlock, ChatMessage } from "../../shared/ipc.j
 import {
   IconCheck,
   IconFile,
+  IconGlobe,
   IconPencil,
   IconSpinner,
   IconTerminal,
@@ -93,6 +94,88 @@ function ReadBody({ path, offset, output }: { path: string; offset?: number; out
         </pre>
       </div>
       {note && <p className="border-t border-ink-800 px-3 py-1.5 text-[11px] text-mist-500">{note}</p>}
+    </div>
+  );
+}
+
+// ---------- web fetch ----------
+
+interface FetchHeader {
+  status: number;
+  statusText: string;
+  contentType: string;
+  redirectedTo?: string;
+}
+
+/** The tool's model output starts with "HTTP <status> <text> · <type> [· redirected to <url>]". */
+function parseFetchHeader(output: string): { header?: FetchHeader; body: string } {
+  const divider = output.indexOf("\n" + "—".repeat(24) + "\n");
+  if (divider === -1) return { body: output };
+  const firstLine = output.slice(0, divider);
+  const body = output.slice(divider + 27);
+  const match = firstLine.match(/^HTTP (\d+) ([^·]*?)(?: · ([^·]*?))?(?: · redirected to (.+))?$/);
+  if (!match) return { body: output };
+  return {
+    header: {
+      status: Number(match[1]),
+      statusText: match[2].trim(),
+      contentType: (match[3] ?? "").trim(),
+      redirectedTo: match[4],
+    },
+    body,
+  };
+}
+
+function statusTone(status: number): string {
+  if (status >= 500) return "text-rose-soft";
+  if (status >= 400) return "text-amber-soft";
+  if (status >= 300) return "text-iris-400";
+  return "text-jade-400";
+}
+
+function FetchBody({
+  url,
+  method,
+  output,
+  isError,
+}: {
+  url: string;
+  method: string;
+  output: string;
+  isError: boolean;
+}) {
+  const { header, body } = isError ? { body: output } : parseFetchHeader(output);
+  return (
+    <div className="overflow-hidden rounded-lg border border-ink-800 bg-ink-950">
+      <div className="flex items-center gap-2 border-b border-ink-800 px-3 py-2 font-mono text-[12px]">
+        <span className="shrink-0 rounded border border-iris-400/40 px-1.5 py-0.5 text-[10.5px] font-semibold text-iris-400">
+          {method}
+        </span>
+        <span className="min-w-0 truncate text-mist-200">{url}</span>
+      </div>
+      {header && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-ink-800 px-3 py-1.5 font-mono text-[11px]">
+          <span className={cx("font-semibold", statusTone(header.status))}>
+            {header.status} {header.statusText}
+          </span>
+          {header.contentType && <span className="text-mist-500">{header.contentType}</span>}
+          {header.redirectedTo && (
+            <span className="min-w-0 truncate text-mist-500">→ {header.redirectedTo}</span>
+          )}
+        </div>
+      )}
+      {body.trim() ? (
+        <pre
+          className={cx(
+            "max-h-72 overflow-auto px-3 py-2 font-mono text-[11.5px] leading-relaxed whitespace-pre-wrap",
+            isError ? "text-rose-soft" : "text-mist-400",
+          )}
+        >
+          {body.length > 20_000 ? `${body.slice(0, 20_000)}\n… (truncated)` : body}
+        </pre>
+      ) : (
+        !isError && <p className="px-3 py-2 font-mono text-[11.5px] text-mist-600">(empty body)</p>
+      )}
     </div>
   );
 }
@@ -203,6 +286,7 @@ const TOOL_ICON: Record<string, typeof IconTerminal> = {
   read: IconFile,
   write: IconFile,
   edit: IconPencil,
+  web_fetch: IconGlobe,
 };
 
 interface ToolCardProps {
@@ -236,6 +320,10 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
   // A one-line summary that reads like a sentence rather than JSON.
   const summary = (() => {
     if (name === "bash") return String(args.command ?? "");
+    if (name === "web_fetch") {
+      const method = String(args.method ?? "GET").toUpperCase();
+      return method === "GET" ? String(args.url ?? "") : `${method} ${String(args.url ?? "")}`;
+    }
     if (typeof args.path === "string") {
       const range =
         name === "read" && args.offset ? ` :${args.offset}${args.limit ? `-${args.offset + args.limit - 1}` : "+"}` : "";
@@ -256,6 +344,16 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
     if (diffRows) return <DiffView rows={diffRows} />;
     if (name === "bash") {
       return <BashBody command={String(args.command ?? "")} output={output} isError={isError} />;
+    }
+    if (name === "web_fetch") {
+      return (
+        <FetchBody
+          url={String(args.url ?? "")}
+          method={String(args.method ?? "GET").toUpperCase()}
+          output={output}
+          isError={isError}
+        />
+      );
     }
     if (name === "read" && !isError && output) {
       return <ReadBody path={String(args.path ?? "")} offset={args.offset} output={output} />;
@@ -322,7 +420,9 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
       {approval && (
         <div className="border-t border-amber-soft/30 bg-amber-soft/[0.06] px-3 py-2.5">
           <p className="text-[12px] text-amber-soft">
-            The agent wants to run this shell command in your workspace.
+            {name === "web_fetch"
+              ? "The agent wants to fetch this URL from the internet."
+              : "The agent wants to run this shell command in your workspace."}
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
@@ -330,14 +430,14 @@ export function ToolCard({ call, run, result, approval, onApprove }: ToolCardPro
               onClick={() => onApprove(approval.approvalId, true, false)}
               className="flex items-center gap-1.5 rounded-lg border border-jade-400/40 px-2.5 py-1.5 text-[12px] font-medium text-jade-400 transition hover:bg-jade-400/10"
             >
-              <IconCheck className="h-3.5 w-3.5" /> Run once
+              <IconCheck className="h-3.5 w-3.5" /> {name === "web_fetch" ? "Fetch once" : "Run once"}
             </button>
             <button
               type="button"
               onClick={() => onApprove(approval.approvalId, true, true)}
               className="rounded-lg border border-ink-600 px-2.5 py-1.5 text-[12px] font-medium text-mist-300 transition hover:bg-ink-750"
             >
-              Always run commands
+              {name === "web_fetch" ? "Always fetch URLs" : "Always run commands"}
             </button>
             <button
               type="button"

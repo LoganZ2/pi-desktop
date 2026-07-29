@@ -42,12 +42,27 @@ import type { EncryptedCredentialStore } from "./credentials.js";
 import { maybeRegisterFauxDemo } from "./faux-demo.js";
 import { ModelRegistry, modelKey } from "./model-registry.js";
 import { checkProjectName, createProject } from "./projects.js";
+import { loadAgentsInstructions } from "./agents-md.js";
 import type { ConfigStore } from "./config-store.js";
 import type { ModelStore } from "./model-store.js";
+import {
+  getPonytailInstructions,
+  isPonytailDeactivationCommand,
+  normalizePonytailMode,
+} from "./ponytail.js";
+import { createWebFetchTool } from "./web-fetch.js";
 import { SessionManager, titleFromPrompt } from "./session-manager.js";
 import { TurnCheckpoint, type FinishedTurnCheckpoint } from "./turn-checkpoint.js";
 
 type Tools = AgentHarnessTool<ExecutionToolContext>[];
+
+/** One-line, human-readable description of a fetch call for the approval prompt. */
+function describeFetch(input: unknown): string {
+  const args = (input ?? {}) as { method?: string; url?: string };
+  if (typeof args.url !== "string") return JSON.stringify(input ?? {});
+  const method = (args.method ?? "GET").toUpperCase();
+  return method === "GET" ? args.url : `${method} ${args.url}`;
+}
 
 const TURN_CHANGES_ENTRY = "pi-desktop:turn-changes";
 const FILE_UNDO_MESSAGE = "pi-desktop:file-undo";
@@ -103,6 +118,10 @@ export class AgentService {
   private persistActiveKey = true;
   /** Workspace and approval policy for the chat that is currently open. */
   private sessionSettings: SessionSettings | null = null;
+  /** Per-chat override set by "stop ponytail" / "normal mode"; null = follow behavior setting. */
+  private ponytailSessionOff = new Set<string>();
+  /** AGENTS.md chain for the current workspace, loaded once when the chat opens. */
+  private agentsInstructions: string | null = null;
 
   onEvent?: (event: AgentHarnessEvent) => void;
   onApprovalRequest?: (request: ApprovalRequest) => void;
@@ -132,6 +151,7 @@ export class AgentService {
     if (this.env.cwd === workspace && !preserveCurrent) return;
     if (!preserveCurrent) void this.env.cleanup();
     this.env = new NodeExecutionEnv({ cwd: workspace });
+    this.agentsInstructions = loadAgentsInstructions(workspace);
   }
 
   private setActiveKey(key: string | null): void {
@@ -160,9 +180,15 @@ export class AgentService {
     // chat cannot exist without a workspace the user picked.
   }
 
+  private ponytailEnabled(): boolean {
+    if (normalizePonytailMode(this.config.behavior.ponytailMode) === "off") return false;
+    const sessionPath = this.config.activeSessionPath;
+    return !sessionPath || !this.ponytailSessionOff.has(sessionPath);
+  }
+
   private systemPrompt(): string {
     const workspace = this.sessionSettings?.workspace ?? this.config.behavior.projectsRoot;
-    return [
+    const parts = [
       "You are pi desktop, a coding agent running inside a desktop app, built on the pi agent framework.",
       "You help with software engineering tasks: reading and writing code, running shell commands, and explaining what you find.",
       "",
@@ -172,14 +198,31 @@ export class AgentService {
       "",
       "Rules:",
       "- Prefer the read/edit/write tools for file operations; use bash for everything else.",
+      "- To fetch a URL, use the web_fetch tool rather than curl or wget in bash.",
       "- Relative paths resolve against the working directory.",
       "- Keep answers concise. Use markdown code blocks for code.",
       "- Never run destructive commands unless the user explicitly asks.",
-    ].join("\n");
+    ];
+    if (this.agentsInstructions) {
+      parts.push("", this.agentsInstructions);
+    }
+    if (this.ponytailEnabled()) {
+      parts.push(
+        "",
+        getPonytailInstructions(normalizePonytailMode(this.config.behavior.ponytailMode)),
+      );
+    }
+    return parts.join("\n");
   }
 
   private buildTools(): Tools {
-    return [createReadTool(), createBashTool(), createEditTool(), createWriteTool()] as Tools;
+    return [
+      createReadTool(),
+      createBashTool(),
+      createEditTool(),
+      createWriteTool(),
+      createWebFetchTool(),
+    ] as unknown as Tools;
   }
 
   private createHarness(
@@ -215,11 +258,14 @@ export class AgentService {
         this.config.activeSessionPath === sessionPath
           ? this.sessionSettings
           : this.backgroundSessions.get(sessionPath)?.settings;
-      if (event.toolName !== "bash" || settings?.approvalMode === "auto") return;
+      const needsApproval = event.toolName === "bash" || event.toolName === "web_fetch";
+      if (!needsApproval || settings?.approvalMode === "auto") return;
       const command =
-        typeof event.input?.command === "string"
-          ? event.input.command
-          : JSON.stringify(event.input ?? {});
+        event.toolName === "web_fetch"
+          ? describeFetch(event.input)
+          : typeof event.input?.command === "string"
+            ? event.input.command
+            : JSON.stringify(event.input ?? {});
       const allowed = await this.requestApproval(
         event.toolCallId,
         event.toolName,
@@ -461,7 +507,7 @@ export class AgentService {
     sessionPath: string,
   ): Promise<boolean> {
     const approvalId = randomUUID();
-    const request = { approvalId, toolCallId, toolName, command };
+    const request = { approvalId, toolCallId, toolName, command, sessionPath };
     return new Promise<boolean>((resolve) => {
       this.pendingApprovals.set(approvalId, { resolve, request, sessionPath });
       if (this.config.activeSessionPath === sessionPath) this.onApprovalRequest?.(request);
@@ -495,6 +541,10 @@ export class AgentService {
     const pendingRun = sessionPath ? this.afterRunPromises.get(sessionPath) : undefined;
     if (pendingRun) await pendingRun;
     if (this.compactionPromise) await this.compactionPromise;
+
+    if (isPonytailDeactivationCommand(text)) {
+      this.ponytailSessionOff.add(sessionPath);
+    }
 
     await this.refreshContextUsage();
     if (
@@ -843,6 +893,7 @@ export class AgentService {
     this.turnCheckpoints.delete(sessionPath);
     this.latestCheckpoints.delete(sessionPath);
     await this.sessions.delete(sessionPath);
+    this.ponytailSessionOff.delete(sessionPath);
     if (!isActive) return;
     const remaining = this.sessions.list();
     // Clear the active path first so openSession does not treat the target as

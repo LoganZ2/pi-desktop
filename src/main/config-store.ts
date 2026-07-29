@@ -26,6 +26,7 @@ const DEFAULTS: BehaviorSettings = {
   autoExpandThinking: false,
   showTokenUsage: true,
   autoCompact: true,
+  ponytailMode: "off",
 };
 
 export class ConfigStore {

@@ -246,14 +246,12 @@ function TurnChangesCard({
   notice: TurnChangesNotice;
   onUndo: (turnId: string) => void;
 }) {
-  const [expandedFile, setExpandedFile] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   if (notice.files.length === 0) return null;
 
   const maxBeforeFold = 5;
-  const visibleFiles = expandedFile
-    ? notice.files
-    : notice.files.slice(0, maxBeforeFold);
+  const visibleFiles = showAll ? notice.files : notice.files.slice(0, maxBeforeFold);
   const hiddenCount = notice.files.length - visibleFiles.length;
 
   return (
@@ -282,76 +280,46 @@ function TurnChangesCard({
       </div>
 
       <div className="border-t border-ink-800">
-        {visibleFiles.map((file) => {
-          const isExpanded = expandedFile === file.path;
-          return (
-            <div key={file.path}>
-              <button
-                type="button"
-                onClick={() => setExpandedFile(isExpanded ? null : file.path)}
-                className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-[11.5px] transition hover:bg-ink-800/50"
-              >
-                <span
-                  className={cx(
-                    "w-4 shrink-0 text-center text-[10px] font-semibold",
-                    file.status === "added"
-                      ? "text-jade-400"
-                      : file.status === "deleted"
-                        ? "text-rose-soft"
-                        : "text-mist-400",
-                  )}
-                >
-                  {file.status === "added" ? "A" : file.status === "deleted" ? "D" : "M"}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-mist-300">{file.path}</span>
-                {(file.addedLines !== undefined || file.removedLines !== undefined) && (
-                  <span className="flex shrink-0 items-center gap-1 font-mono text-[10.5px]">
-                    {file.addedLines !== undefined && file.addedLines > 0 && (
-                      <span className="text-jade-400">+{file.addedLines}</span>
-                    )}
-                    {file.removedLines !== undefined && file.removedLines > 0 && (
-                      <span className="text-rose-soft">−{file.removedLines}</span>
-                    )}
-                  </span>
+        {visibleFiles.map((file) => (
+          <div
+            key={file.path}
+            className="flex items-center gap-2.5 px-3 py-1.5 font-mono text-[11.5px]"
+          >
+            <span
+              className={cx(
+                "w-4 shrink-0 text-center text-[10px] font-semibold",
+                file.status === "added"
+                  ? "text-jade-400"
+                  : file.status === "deleted"
+                    ? "text-rose-soft"
+                    : "text-mist-400",
+              )}
+            >
+              {file.status === "added" ? "A" : file.status === "deleted" ? "D" : "M"}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-mist-300">{file.path}</span>
+            {(file.addedLines !== undefined || file.removedLines !== undefined) && (
+              <span className="flex shrink-0 items-center gap-1 font-mono text-[10.5px]">
+                {file.addedLines !== undefined && file.addedLines > 0 && (
+                  <span className="text-jade-400">+{file.addedLines}</span>
                 )}
-                <IconChevron
-                  className={cx(
-                    "h-3 w-3 shrink-0 text-mist-600 transition",
-                    isExpanded && "rotate-180",
-                  )}
-                />
-              </button>
-              {isExpanded && <FileChangePreview path={file.path} status={file.status} />}
-            </div>
-          );
-        })}
+                {file.removedLines !== undefined && file.removedLines > 0 && (
+                  <span className="text-rose-soft">−{file.removedLines}</span>
+                )}
+              </span>
+            )}
+          </div>
+        ))}
         {hiddenCount > 0 && (
           <button
             type="button"
-            onClick={() => setExpandedFile("__show_all")}
+            onClick={() => setShowAll(true)}
             className="w-full px-3 py-1.5 text-left text-[11px] text-mist-500 transition hover:text-mist-300"
           >
             Show {hiddenCount} more file{hiddenCount === 1 ? "" : "s"}
           </button>
         )}
       </div>
-    </div>
-  );
-}
-
-function FileChangePreview({ path, status }: { path: string; status: string }) {
-  if (status === "deleted") {
-    return (
-      <div className="border-t border-ink-800 px-3 py-2 text-[11.5px] text-mist-500">
-        File was deleted.
-      </div>
-    );
-  }
-  // A full diff preview would need the file content stored in the checkpoint.
-  // For now show that it was added/modified.
-  return (
-    <div className="border-t border-ink-800 px-3 py-2 text-[11.5px] text-mist-500">
-      {status === "added" ? "File was created." : "File was modified."}
     </div>
   );
 }

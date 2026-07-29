@@ -25,6 +25,9 @@ export interface SessionSettings {
   approvalMode: ApprovalMode;
 }
 
+/** Ponytail (lazy senior dev) intensity, embedded in the system prompt. */
+export type PonytailMode = "off" | "lite" | "full" | "ultra";
+
 /** App-wide settings, including the starting point for each new chat. */
 export interface BehaviorSettings {
   /** Parent folder for named projects. */
@@ -36,6 +39,8 @@ export interface BehaviorSettings {
   showTokenUsage: boolean;
   /** Summarize old history automatically before the model context fills up. */
   autoCompact: boolean;
+  /** Lazy senior dev mode: pushes the agent toward the smallest working solution. */
+  ponytailMode: PonytailMode;
 }
 
 /** How a new chat's workspace is chosen. */
@@ -213,6 +218,8 @@ export interface ApprovalRequest {
   toolCallId: string;
   toolName: string;
   command: string;
+  /** Chat the approval belongs to, so a stale banner never blocks another chat. */
+  sessionPath: string;
 }
 
 export interface CustomProviderInput {
